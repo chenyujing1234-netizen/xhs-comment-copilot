@@ -1,0 +1,16 @@
+[Unit]
+Description=xhs-plugin-report (小红书获客插件数据上报服务)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/xhs-report
+Environment=TZ=Asia/Shanghai
+# 敏感配置（如 XHS_DB_PASS）放在 /opt/xhs-report/.env，该文件不进仓库
+EnvironmentFile=/opt/xhs-report/.env
+ExecStart=/opt/xhs-report/venv/bin/uvicorn app:app --host 0.0.0.0 --port 8081
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

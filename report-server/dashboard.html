@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>小红书获客插件 · 运营看板</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f6f8; color: #1f2329; font-size: 13px; line-height: 1.5;
+  }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 24px; background: linear-gradient(135deg, #ff2442, #ff6a3d); color: #fff;
+  }
+  .topbar h1 { font-size: 16px; font-weight: 700; }
+  .topbar .sub { font-size: 12px; opacity: .85; margin-top: 2px; }
+  .topbar .right { font-size: 12px; text-align: right; }
+  .wrap { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card {
+    background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 14px 16px;
+  }
+  .card .label { font-size: 12px; color: #8a919f; }
+  .card .value { font-size: 24px; font-weight: 700; margin-top: 4px; }
+  .card .value small { font-size: 12px; font-weight: 400; color: #8a919f; margin-left: 4px; }
+  .card.accent .value { color: #ff2442; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 16px; }
+  @media (max-width: 800px) { .grid2 { grid-template-columns: 1fr; } }
+  .panel { background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; padding: 16px; margin-bottom: 16px; }
+  .panel h2 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid #f1f2f4; vertical-align: top; }
+  th { color: #8a919f; font-weight: 500; white-space: nowrap; }
+  tr:hover td { background: #fafbfc; }
+  .tag { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 11px; white-space: nowrap; }
+  .tag.ok { background: #dcfce7; color: #15803d; }
+  .tag.fail { background: #fee2e2; color: #b91c1c; }
+  .tag.run { background: #dbeafe; color: #1d4ed8; }
+  .tag.done { background: #f1f5f9; color: #475569; }
+  a { color: #2563eb; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .muted { color: #8a919f; }
+  .ellipsis { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 趋势图 */
+  .trend { display: flex; align-items: flex-end; gap: 10px; height: 140px; padding-top: 8px; }
+  .trend .day { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; height: 100%; justify-content: flex-end; }
+  .trend .bars { display: flex; align-items: flex-end; gap: 3px; height: 100%; width: 100%; justify-content: center; }
+  .trend .bar { width: 14px; border-radius: 3px 3px 0 0; min-height: 2px; }
+  .trend .bar.c { background: #ff2442; }
+  .trend .bar.r { background: #fb923c; }
+  .trend .lab { font-size: 11px; color: #8a919f; }
+  .legend { display: flex; gap: 14px; font-size: 12px; color: #64748b; margin-top: 8px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+  /* 排行条 */
+  .rank { display: flex; flex-direction: column; gap: 8px; }
+  .rank .row { display: flex; align-items: center; gap: 8px; }
+  .rank .name { width: 130px; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rank .track { flex: 1; background: #f1f2f4; border-radius: 4px; height: 14px; overflow: hidden; }
+  .rank .fill { height: 100%; background: linear-gradient(90deg, #ff2442, #ff6a3d); border-radius: 4px; }
+  .rank .cnt { width: 34px; text-align: right; font-size: 12px; color: #64748b; }
+  .err-box { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; padding: 12px 16px; border-radius: 10px; margin: 16px; }
+  .loading { text-align: center; color: #8a919f; padding: 40px 0; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div>
+    <h1>小红书获客插件 · 运营看板</h1>
+    <div class="sub">评论发布 / 回复触达 / 客户标识（手机号）运行数据</div>
+  </div>
+  <div class="right">
+    <div id="refreshInfo">每 30 秒自动刷新</div>
+    <div id="lastUpdate" class="sub"></div>
+  </div>
+</div>
+
+<div class="wrap" id="app"><div class="loading">加载中…</div></div>
+
+<script>
+(function () {
+  var app = document.getElementById('app');
+  var params = new URLSearchParams(location.search);
+  var key = params.get('key') || localStorage.getItem('xhs_report_key') || '';
+  if (params.get('key')) localStorage.setItem('xhs_report_key', key);
+
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+  function link(url, text) {
+    if (!url) return '<span class="muted">-</span>';
+    return '<a href="' + esc(url) + '" target="_blank" rel="noopener">' + esc(text || url) + '</a>';
+  }
+  function tag(ok, label) {
+    return '<span class="tag ' + (ok ? 'ok">成功' : 'fail">' + esc(label || '失败')) + '</span>';
+  }
+
+  function renderTrend(trend) {
+    var max = 0;
+    trend.forEach(function (d) { max = Math.max(max, d.comments, d.replies); });
+    if (max < 4) max = 4;
+    var days = trend.map(function (d) {
+      var hc = Math.round(d.comments / max * 100), hr = Math.round(d.replies / max * 100);
+      return '<div class="day"><div class="bars">' +
+        '<div class="bar c" style="height:' + hc + '%" title="评论 ' + d.comments + '"></div>' +
+        '<div class="bar r" style="height:' + hr + '%" title="回复 ' + d.replies + '"></div>' +
+        '</div><div class="lab">' + d.date.slice(5) + '</div></div>';
+    }).join('');
+    return '<div class="trend">' + days + '</div>' +
+      '<div class="legend"><span><i style="background:#ff2442"></i>评论</span><span><i style="background:#fb923c"></i>回复</span></div>';
+  }
+
+  function renderRank(list, total) {
+    if (!list.length) return '<div class="muted">暂无数据</div>';
+    var max = list[0].count || 1;
+    return '<div class="rank">' + list.map(function (r) {
+      var pct = Math.round(r.count / max * 100);
+      return '<div class="row"><div class="name" title="' + esc(r.name) + '">' + esc(r.name) + '</div>' +
+        '<div class="track"><div class="fill" style="width:' + pct + '%"></div></div>' +
+        '<div class="cnt">' + r.count + '</div></div>';
+    }).join('') + '</div>';
+  }
+
+  function render(d) {
+    var s = d.summary;
+    var html = '';
+
+    // 汇总卡片
+    html += '<div class="cards">' +
+      card('今日评论', s.comment_today, true) +
+      card('今日回复', s.reply_today, true) +
+      card('累计评论', s.comment_total, '成功 ' + s.comment_ok) +
+      card('累计回复', s.reply_total, '成功 ' + s.reply_ok) +
+      card('客户端（手机号）', s.device_count) +
+      card('产品库', s.product_count) +
+      card('运行中任务', s.running_runs) +
+      '</div>';
+
+    // 趋势
+    html += '<div class="panel"><h2>最近 7 天</h2>' + renderTrend(d.trend) + '</div>';
+
+    // 排行
+    html += '<div class="grid2">' +
+      '<div class="panel"><h2>按产品统计（评论数）</h2>' + renderRank(d.by_product) + '</div>' +
+      '<div class="panel"><h2>按关键词统计（评论数）</h2>' + renderRank(d.by_keyword) + '</div>' +
+      '</div>';
+
+    // 最近任务
+    html += '<div class="panel"><h2>最近任务</h2><table><tr>' +
+      '<th>ID</th><th>手机号</th><th>关键词/产品</th><th>评论</th><th>回复</th><th>状态</th><th>开始时间</th><th>结束时间</th></tr>' +
+      d.runs.map(function (r) {
+        return '<tr><td>' + r.id + '</td><td>' + esc(r.phone) + '</td>' +
+          '<td>' + r.keyword_total + ' / ' + r.product_total + '</td>' +
+          '<td>' + r.comments_total + '</td><td>' + r.replies_total + '</td>' +
+          '<td><span class="tag ' + (r.status === 'running' ? 'run">运行中' : 'done">已结束') + '</span></td>' +
+          '<td class="muted">' + esc(r.started_at) + '</td><td class="muted">' + esc(r.ended_at || '-') + '</td></tr>';
+      }).join('') + '</table></div>';
+
+    // 最近评论
+    html += '<div class="panel"><h2>最近评论（发布在哪个视频）</h2><table><tr>' +
+      '<th>时间</th><th>手机号</th><th>产品 / 关键词</th><th>视频</th><th>评论内容</th><th>状态</th></tr>' +
+      d.comments.map(function (c) {
+        return '<tr><td class="muted">' + esc(c.time) + '</td><td>' + esc(c.phone) + '</td>' +
+          '<td><div>' + esc(c.product) + '</div><div class="muted">' + esc(c.keyword) + '</div></td>' +
+          '<td class="ellipsis" title="' + esc(c.title) + '">' + link(c.url, c.title || c.url) + '</td>' +
+          '<td class="ellipsis" title="' + esc(c.text) + '">' + esc(c.text) + '</td>' +
+          '<td>' + tag(c.ok, c.error) + '</td></tr>';
+      }).join('') + '</table></div>';
+
+    // 最近回复
+    html += '<div class="panel"><h2>最近回复（回复了谁）</h2><table><tr>' +
+      '<th>时间</th><th>手机号</th><th>回复对象</th><th>对方评论</th><th>我的回复</th><th>视频</th><th>状态</th></tr>' +
+      d.replies.map(function (r) {
+        return '<tr><td class="muted">' + esc(r.time) + '</td><td>' + esc(r.phone) + '</td>' +
+          '<td>' + esc(r.name) + '</td>' +
+          '<td class="ellipsis" title="' + esc(r.target) + '">' + esc(r.target) + '</td>' +
+          '<td class="ellipsis" title="' + esc(r.text) + '">' + esc(r.text) + '</td>' +
+          '<td class="ellipsis">' + link(r.url, r.title || '链接') + '</td>' +
+          '<td>' + tag(r.ok, r.error) + '</td></tr>';
+      }).join('') + '</table></div>';
+
+    // 产品库
+    html += '<div class="panel"><h2>产品库（各客户端在推的产品）</h2>' +
+      (d.products.length ? '<table><tr>' +
+      '<th>手机号</th><th>产品名称</th><th>产品描述</th><th>启用</th><th>更新时间</th></tr>' +
+      d.products.map(function (p) {
+        return '<tr><td>' + esc(p.phone) + '</td>' +
+          '<td>' + esc(p.name) + '</td>' +
+          '<td class="ellipsis" style="max-width:420px" title="' + esc(p.description) + '">' + esc(p.description) + '</td>' +
+          '<td><span class="tag ' + (p.selected ? 'ok">已启用' : 'done">未启用') + '</span></td>' +
+          '<td class="muted">' + esc(p.updated_at) + '</td></tr>';
+      }).join('') + '</table>' : '<div class="muted">暂无数据</div>') + '</div>';
+
+    // 客户端
+    html += '<div class="panel"><h2>客户端列表</h2><table><tr>' +
+      '<th>手机号</th><th>首次出现</th><th>最近活跃</th><th>登录次数</th></tr>' +
+      d.devices.map(function (v) {
+        return '<tr><td>' + esc(v.phone) + '</td><td class="muted">' + esc(v.first_seen) + '</td>' +
+          '<td class="muted">' + esc(v.last_seen) + '</td><td>' + v.login_count + '</td></tr>';
+      }).join('') + '</table></div>';
+
+    app.innerHTML = html;
+    document.getElementById('lastUpdate').textContent = '更新于 ' + new Date().toLocaleTimeString('zh-CN', { hour12: false });
+  }
+
+  function card(label, value, small) {
+    return '<div class="card accent"><div class="label">' + esc(label) + '</div>' +
+      '<div class="value">' + value + (small ? '<small>' + esc(small) + '</small>' : '') + '</div></div>';
+  }
+
+  function load() {
+    if (!key) {
+      app.innerHTML = '<div class="err-box">缺少访问密钥。请在链接中带上 <b>?key=你的密钥</b> 打开本页面，例如：<br>http://124.221.115.174/xhs-report/?key=xhs-report-2026</div>';
+      return;
+    }
+    fetch('api/dashboard?key=' + encodeURIComponent(key))
+      .then(function (r) { return r.json().then(function (j) { return { status: r.status, body: j }; }); })
+      .then(function (res) {
+        if (res.status !== 200 || !res.body.ok) {
+          app.innerHTML = '<div class="err-box">加载失败（' + res.status + '）：' + esc(res.body.detail || '未知错误') + '</div>';
+          return;
+        }
+        render(res.body);
+      })
+      .catch(function (e) {
+        app.innerHTML = '<div class="err-box">请求失败：' + esc(e.message) + '</div>';
+      });
+  }
+
+  load();
+  setInterval(load, 30000);
+})();
+</script>
+</body>
+</html>

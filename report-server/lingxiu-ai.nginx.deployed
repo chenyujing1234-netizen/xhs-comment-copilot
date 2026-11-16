@@ -1,0 +1,149 @@
+# 灵修AI — nginx（裸 IP + 自签证书，备用入口）
+#
+# 访问: https://124.221.115.174/
+# 主入口是 https://linkpal.cloud/，见 sites-available/linkpal.cloud。
+#
+# 为什么是自签证书而不是 Let's Encrypt：
+#   本机在腾讯云大陆区，未备案域名走 80 端口会被 DNSPod 替换成拦截页
+#   (dnspod.qcloud.com/static/webblock.html)，ACME HTTP-01 验证因此无法通过，
+#   而 Let's Encrypt 也不为裸 IP 签发证书。故用自签证书，SAN 内含 IP。
+#   代价：浏览器首次访问需手动信任；微信内置浏览器 / 小程序 web-view 打不开。
+#   若日后要用微信或免警告，改用已备案主域的子域并换回 certbot 即可。
+#
+# 本 server 是 443 的 default_server：裸 IP 访问不发送 SNI，必须由默认 server 应答。
+# listen 上保留 http2 是刻意的——443 的协议选项由 default_server 决定，
+# 去掉会让本机其它 5 个 HTTP/2 站点一起降级到 HTTP/1.1。
+
+upstream lingxiu_app {
+    server 127.0.0.1:3210;
+    keepalive 16;
+}
+
+server {
+    listen 80;
+    listen [::]:80;
+    server_name 124.221.115.174 124.221.115.174.sslip.io;
+
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    # 小红书获客插件上报服务：运营看板 + 数据接口
+    # 访问：http://124.221.115.174/xhs-report/?key=xhs-report-2026
+    # 说明：插件 background 用 HTTP 上报（避免自签证书问题）；此路径不跳转 https。
+    location /xhs-report/ {
+        proxy_pass http://127.0.0.1:8081/;
+        proxy_http_version 1.1;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_connect_timeout 10s;
+        proxy_read_timeout    60s;
+    }
+
+    location = /xhs-report {
+        return 301 /xhs-report/;
+    }
+
+    # 注意：公网经 80 端口访问裸 IP 会先被备案拦截页截走，这里的跳转只在
+    # 内网/直连时生效。对外请直接使用 https:// 地址。
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl http2 default_server;
+    listen [::]:443 ssl http2 default_server;
+    server_name 124.221.115.174 124.221.115.174.sslip.io;
+
+    ssl_certificate /etc/nginx/ssl/lingxiu-ai/fullchain.pem;
+    ssl_certificate_key /etc/nginx/ssl/lingxiu-ai/privkey.pem;
+    ssl_session_cache shared:SSL_lingxiu:5m;
+    ssl_session_timeout 1h;
+
+    # 录音与手写笔记以 base64 / 二进制提交，放宽上限
+    client_max_body_size 32m;
+
+    # 不泄露版本号
+    server_tokens off;
+
+    # 邀请制私密工具，禁止被搜索引擎收录
+    add_header X-Robots-Tag "noindex, nofollow" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
+    location = /robots.txt {
+        default_type text/plain;
+        return 200 "User-agent: *\nDisallow: /\n";
+    }
+
+    location = /healthz {
+        access_log off;
+        proxy_pass http://lingxiu_app/login;
+        proxy_set_header Host $host;
+    }
+
+    # 构建产物带内容哈希，可长期强缓存
+    location /_next/static/ {
+        proxy_pass http://lingxiu_app;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_cache_valid 200 1y;
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+        access_log off;
+    }
+
+    # AI 引导逐字输出（SSE）：必须关闭缓冲，否则前端看不到流式效果
+    location /api/devotion/ {
+        proxy_pass http://lingxiu_app;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $host;
+
+        proxy_buffering off;
+        proxy_cache off;
+        gzip off;
+        chunked_transfer_encoding on;
+        # 主模型首字约 10 秒、复杂出题可达 200 秒，留足余量
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    # 其余 AI 接口（出题 / 评分 / 抽取 / 配图）同样耗时较长
+    location /api/ {
+        proxy_pass http://lingxiu_app;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $host;
+
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
+    }
+
+    location / {
+        proxy_pass http://lingxiu_app;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Host $host;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+    }
+}

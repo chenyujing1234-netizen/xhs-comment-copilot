@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>小红书评论获客助手</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body class="not-logged">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">获客</span>
+      <div>
+        <h1>小红书评论获客助手</h1>
+        <p id="statusText" class="status idle">● 空闲</p>
+      </div>
+    </div>
+    <div class="user-box">
+      <span id="userPhone" class="user-phone"></span>
+      <button id="btnLogout" class="btn btn-small btn-logout" style="display:none">退出</button>
+    </div>
+    <button id="btnStop" class="btn btn-danger" title="停止任务">停止</button>
+  </header>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="run">运行</button>
+    <button class="tab" data-tab="products">产品</button>
+    <button class="tab" data-tab="task">任务</button>
+    <button class="tab" data-tab="settings">设置</button>
+  </nav>
+
+  <main>
+    <!-- 登录门禁：未登录时只显示此面板 -->
+    <section id="loginGate" class="panel">
+      <div class="card">
+        <div class="card-head"><span>手机号登录</span></div>
+        <p class="test-result">为标识客户端身份，请先使用手机号验证码登录。登录后本插件的所有操作都将以该手机号作为账号标识。</p>
+        <div class="field">
+          <label>手机号</label>
+          <input id="loginPhone" type="tel" maxlength="11" inputmode="numeric" placeholder="请输入 11 位手机号" />
+        </div>
+        <div class="field">
+          <label>验证码</label>
+          <div class="code-row">
+            <input id="loginCode" type="text" maxlength="4" inputmode="numeric" placeholder="4 位数字验证码" />
+            <button id="btnSendCode" class="btn">获取验证码</button>
+          </div>
+        </div>
+        <p id="loginMsg" class="test-result"></p>
+        <div class="row">
+          <button id="btnLogin" class="btn btn-primary">登录</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 运行 -->
+    <section id="tab-run" class="panel active">
+      <div class="card">
+        <div class="row">
+          <button id="btnStart" class="btn btn-primary">▶ 开始任务</button>
+          <button id="btnPause" class="btn" disabled>暂停</button>
+          <button id="btnResume" class="btn" disabled>继续</button>
+          <button id="btnClearLogs" class="btn">清空日志</button>
+        </div>
+        <div class="progress">
+          <span id="progressText">未开始</span>
+          <div class="bar"><div id="progressBar" class="fill"></div></div>
+        </div>
+      </div>
+
+      <div class="card logs-card">
+        <div class="card-head">
+          <span>执行日志</span>
+          <button id="btnExportLogs" class="btn btn-small">导出</button>
+        </div>
+        <div id="logs" class="logs"></div>
+      </div>
+    </section>
+
+    <!-- 产品 -->
+    <section id="tab-products" class="panel">
+      <div class="card">
+        <div class="card-head">
+          <span>产品管理</span>
+          <button id="btnAddProduct" class="btn btn-primary btn-small">+ 添加产品</button>
+        </div>
+        <div id="productList" class="product-list"></div>
+        <div class="row">
+          <button id="btnSaveProducts" class="btn btn-primary">保存产品</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 任务 -->
+    <section id="tab-task" class="panel">
+      <div class="card">
+        <div class="card-head"><span>关键词设置</span></div>
+        <div class="field">
+          <label>搜索关键词（每行一个）</label>
+          <textarea id="keywordsInput" rows="6" placeholder="例如：产后恢复、宝宝湿疹怎么办、新手妈妈好物……"></textarea>
+        </div>
+        <div class="row">
+          <button id="btnGenKeywords" class="btn btn-primary">AI 生成关键词（基于所选产品）</button>
+          <button id="btnClearKeywords" class="btn">清空</button>
+          <button id="btnSaveKeywords" class="btn">保存关键词</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span>本次任务参数</span></div>
+        <div class="field-grid">
+          <div class="field">
+            <label>每关键词视频数</label>
+            <input id="maxVideos" type="number" min="1" max="20" value="5" />
+          </div>
+          <div class="field">
+            <label>评论间隔(秒) 最小</label>
+            <input id="commentIntervalMin" type="number" min="10" value="45" />
+          </div>
+          <div class="field">
+            <label>评论间隔(秒) 最大</label>
+            <input id="commentIntervalMax" type="number" min="20" value="100" />
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 设置 -->
+    <section id="tab-settings" class="panel">
+      <div class="card">
+        <div class="card-head"><span>模型与接口设置</span></div>
+        <div class="field">
+          <label>Base URL</label>
+          <input id="baseUrl" type="text" />
+        </div>
+        <div class="field">
+          <label>API Key</label>
+          <input id="apiKey" type="password" />
+          <button id="btnToggleKey" class="btn btn-small">显示</button>
+        </div>
+        <div class="field-grid">
+          <div class="field">
+            <label>短信 AccessKey ID（登录验证码）</label>
+            <input id="smsAccessKeyId" type="text" placeholder="LTAI..." />
+          </div>
+          <div class="field">
+            <label>短信 AccessKey Secret</label>
+            <input id="smsAccessKeySecret" type="password" placeholder="阿里云短信签名使用的 AK" />
+          </div>
+        </div>
+        <div class="field">
+          <label>模型</label>
+          <select id="model"></select>
+        </div>
+        <div class="field-grid">
+          <div class="field">
+            <label>评论最小长度</label>
+            <input id="commentMinLen" type="number" min="4" value="6" />
+          </div>
+          <div class="field">
+            <label>评论最大长度</label>
+            <input id="commentMaxLen" type="number" min="8" max="200" value="25" />
+          </div>
+        </div>
+        <div class="field-grid">
+          <div class="field">
+            <label>数据上报地址</label>
+            <input id="reportUrl" type="text" placeholder="http://124.221.115.174/xhs-report" />
+          </div>
+          <div class="field">
+            <label>上报密钥</label>
+            <input id="reportKey" type="text" placeholder="xhs-report-2026" />
+          </div>
+        </div>
+        <div class="row">
+          <button id="btnSaveSettings" class="btn btn-primary">保存设置</button>
+          <button id="btnTestLLM" class="btn">测试连接</button>
+        </div>
+        <p id="testResult" class="test-result"></p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span>拟人化节奏（秒）</span></div>
+        <div class="field-grid">
+          <div class="field"><label>搜索后等待 最小</label><input id="searchDelayMin" type="number" value="10" /></div>
+          <div class="field"><label>搜索后等待 最大</label><input id="searchDelayMax" type="number" value="22" /></div>
+          <div class="field"><label>打开视频后等待 最小</label><input id="noteOpenDelayMin" type="number" value="6" /></div>
+          <div class="field"><label>打开视频后等待 最大</label><input id="noteOpenDelayMax" type="number" value="15" /></div>
+          <div class="field"><label>切换关键词休息 最小</label><input id="keywordIntervalMin" type="number" value="20" /></div>
+          <div class="field"><label>切换关键词休息 最大</label><input id="keywordIntervalMax" type="number" value="40" /></div>
+        </div>
+        <div class="field checkbox">
+          <label><input id="skipCommented" type="checkbox" checked /> 跳过已评论过的视频</label>
+        </div>
+        <div class="row">
+          <button id="btnSaveTiming" class="btn btn-primary">保存节奏设置</button>
+          <button id="btnClearCommented" class="btn">清空评论记录</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span>评论后回复感兴趣的用户</span></div>
+        <div class="field checkbox">
+          <label><input id="enableCommentReply" type="checkbox" checked /> 启用：评论发布成功后，分析评论区找出对产品感兴趣的用户并回复，吸引他人私聊</label>
+        </div>
+        <div class="field-grid">
+          <div class="field">
+            <label>每条视频最多回复数</label>
+            <input id="maxRepliesPerNote" type="number" min="1" max="3" value="1" />
+          </div>
+          <div class="field">
+            <label>回复间隔(秒) 最小</label>
+            <input id="replyDelayMin" type="number" min="5" value="15" />
+          </div>
+          <div class="field">
+            <label>回复间隔(秒) 最大</label>
+            <input id="replyDelayMax" type="number" min="10" value="40" />
+          </div>
+        </div>
+        <div class="row">
+          <button id="btnSaveReply" class="btn btn-primary">保存回复设置</button>
+          <button id="btnClearReplied" class="btn">清空回复记录</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div id="toast" class="toast"></div>
+  <script src="sidepanel.js"></script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+# 敏感配置（仅存服务器/本地，不进仓库）
+.env
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# 临时文件
+.screenshots/
+.trae-html-share-packages/
+node_modules/
+*.log
