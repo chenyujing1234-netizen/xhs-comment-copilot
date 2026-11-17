@@ -1,7 +1,0 @@
-fix: 登录态持久化——auth 双写 local+sync 兜底，GET_STATE 分项容错，避免关闭面板重开后要求重新登录
-
-- background.js：saveAuth 双写 storage.local + storage.sync，任一处成功即保持登录；
-  getAuth 在 local 读空时回退 sync；LOGOUT 走 clearAuth 双清
-- background.js：GET_STATE 逐项容错，单项读取异常不再拖垮整个状态导致登录态丢失
-- sidepanel.js：init 的 GET_STATE 失败时重试一次（SW 冷启动/休眠时首次通信可能失败），
-  并把连接错误显示在登录页（未登录时日志区被隐藏，用户原先看不到任何提示）
