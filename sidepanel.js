@@ -395,6 +395,15 @@ async function init() {
     applyAuthUI();
     renderLogs(resp.logs || []);
     renderStatus();
+    // 后台连接正常却没读到登录态：给出诊断信息（区分存储问题/插件副本问题），便于定位
+    if (!state.auth || !state.auth.phone) {
+      const d = resp.authDiag || {};
+      const fmt = (v) => (v ? '有(' + v + ')' : '无');
+      const diag = '后台连接正常；本地存储=' + (d.error ? '读取失败:' + d.error : fmt(d.local)) +
+        '；同步存储=' + (d.error ? '未知' : fmt(d.sync)) +
+        '；插件ID=' + chrome.runtime.id;
+      setLoginMsg('未检测到登录态。诊断：' + diag + '。如果你刚登录过，请把这段文字反馈给开发者。', false);
+    }
   } else {
     renderLogs([{ timeStr: '--:--:--', level: 'error', message: '无法连接后台：' + (resp && resp.error) }]);
     // 未登录时日志区被隐藏，把连接错误同时显示在登录页上，避免用户只看到登录页却不知原因
