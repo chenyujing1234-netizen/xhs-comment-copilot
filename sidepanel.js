@@ -389,12 +389,18 @@ async function init() {
     state.auth = resp.auth || null;
     state.task = resp.task || {};
     state.modelOptions = resp.modelOptions || [];
-    renderProducts();
-    fillSettingsForm();
-    fillKeywordsForm();
+    // 登录态判定优先执行：后续任一渲染异常都不能让面板卡在登录页
+    // （曾因 fillKeywordsForm 抛 TypeError 中断 init，导致每次重开都要求重新登录）
     applyAuthUI();
-    renderLogs(resp.logs || []);
-    renderStatus();
+    try {
+      renderProducts();
+      fillSettingsForm();
+      fillKeywordsForm();
+      renderLogs(resp.logs || []);
+      renderStatus();
+    } catch (e) {
+      console.error('面板渲染失败：', e);
+    }
     // 后台连接正常却没读到登录态：给出诊断信息（区分存储问题/插件副本问题），便于定位
     if (!state.auth || !state.auth.phone) {
       const d = resp.authDiag || {};
