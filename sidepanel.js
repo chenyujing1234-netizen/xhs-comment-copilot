@@ -182,8 +182,6 @@ function fillSettingsForm() {
   const s = state.settings || {};
   $('baseUrl').value = s.baseUrl || '';
   $('apiKey').value = s.apiKey || '';
-  $('smsAccessKeyId').value = s.smsAccessKeyId || '';
-  $('smsAccessKeySecret').value = s.smsAccessKeySecret || '';
   $('commentMinLen').value = s.commentMinLen != null ? s.commentMinLen : 6;
   $('commentMaxLen').value = s.commentMaxLen != null ? s.commentMaxLen : 25;
   $('reportUrl').value = s.reportUrl || '';
@@ -222,8 +220,6 @@ function collectSettingsForm() {
   return {
     baseUrl: $('baseUrl').value.trim(),
     apiKey: $('apiKey').value.trim(),
-    smsAccessKeyId: $('smsAccessKeyId').value.trim(),
-    smsAccessKeySecret: $('smsAccessKeySecret').value.trim(),
     model: $('model').value,
     commentMinLen: num('commentMinLen'),
     commentMaxLen: num('commentMaxLen'),
