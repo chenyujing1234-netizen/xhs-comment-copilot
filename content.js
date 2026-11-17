@@ -22,6 +22,7 @@
     if (/\/search_result\/[0-9a-zA-Z]+/.test(u)) return 'note'; // 通过搜索进入的单个笔记
     if (u.includes('/search_result')) return 'search';
     if (u.includes('/user/profile')) return 'profile';
+    if (location.pathname.indexOf('/chat') === 0) return 'chat';
     return 'other';
   }
 
@@ -329,16 +330,17 @@
   }
 
   // ===== 用户主页：给感兴趣的用户发私信 =====
-  // 主页「私信」按钮文案一般为「私信」，点击后弹出会话窗口：输入框 contenteditable，发送按钮文案「发送」
+  // 实测（2026-11-17）：主页入口文案为「发消息」（官方号/关闭私信的用户无此按钮）；
+  // 会话页 URL 为 /chat/{userId}，输入框 .xhs-im-input-bar-editor，发送按钮为输入栏内无文本图标按钮
   function findDmButton() {
     const cands = qa('button, span, div, a, [role="button"]');
     let fallback = null;
     for (const el of cands) {
       const t = (el.innerText || '').trim();
-      if (t !== '私信' && t !== '发私信') continue;
+      if (t !== '私信' && t !== '发私信' && t !== '发消息') continue;
       const hasSmaller = qa('*', el).some((c) => {
         const ct = (c.innerText || '').trim();
-        return ct === '私信' || ct === '发私信';
+        return ct === '私信' || ct === '发私信' || ct === '发消息';
       });
       if (hasSmaller) continue;
       const cls = el.getAttribute('class') || '';
@@ -348,29 +350,45 @@
     return fallback;
   }
 
-  async function sendPrivateMessage(text) {
-    const dmBtn = findDmButton();
-    if (!dmBtn) {
-      return { ok: false, error: '用户主页未找到「私信」按钮（该用户可能不接受私信）' };
+  // 私信发送按钮：输入栏（input-bar）内的按钮。小红书用无文本图标按钮，文本匹配找不到
+  function findDmSubmitButton() {
+    const bar = q('[class*="input-bar"]');
+    if (bar) {
+      const b = q('button:not([disabled]), [role="button"]:not([disabled])', bar);
+      if (b) return b;
     }
-    dmBtn.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    await sleep(rnd(400, 800));
-    dmBtn.click();
-    await sleep(rnd(1200, 2000));
+    return q('.xhs-im-input-bar-action-btn') || q('[class*="input-bar"] button');
+  }
+
+  async function sendPrivateMessage(text) {
+    // 已处于会话页（background 直接导航 /chat/{userId}）时无需找主页按钮
+    const inChatPage = location.pathname.indexOf('/chat') === 0;
+    if (!inChatPage) {
+      const dmBtn = findDmButton();
+      if (!dmBtn) {
+        return { ok: false, error: '用户主页未找到「发消息/私信」按钮（该用户可能不接受私信）' };
+      }
+      dmBtn.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      await sleep(rnd(400, 800));
+      dmBtn.click();
+      await sleep(rnd(1200, 2000));
+    }
 
     // 等会话输入框出现：优先私信窗口内的 contenteditable，最后兜底取页面最后一个
     let editor = null;
-    for (let i = 0; i < 10; i++) {
+    for (let i = 0; i < 20; i++) {
       editor =
+        q('.xhs-im-input-bar-editor') ||
         q('[class*="im-chat"] [contenteditable="true"]') ||
         q('[class*="chat"] [contenteditable="true"]') ||
         q('[placeholder*="私信"]') ||
+        q('[placeholder*="发消息"]') ||
         q('[placeholder*="说点什么"]') ||
         (qa('[contenteditable="true"]').slice(-1)[0] || null);
       if (editor) break;
       await sleep(rnd(400, 700));
     }
-    if (!editor) return { ok: false, error: '私信输入框未出现（点击「私信」未生效或该用户不接受私信）' };
+    if (!editor) return { ok: false, error: '私信输入框未出现（该用户可能不接受私信）' };
 
     // 安全检查：输入框非空说明定位错了，中止以防发错
     const existing = (editor.innerText || '').trim();
@@ -393,12 +411,24 @@
     }
     await sleep(rnd(800, 1400));
 
-    const btn = findSubmitNear(editor);
+    const btn = findDmSubmitButton() || findSubmitNear(editor);
     if (!btn) return { ok: false, error: '未找到私信发送按钮' };
     if (isSubmitDisabled(btn)) return { ok: false, error: '私信发送按钮不可用（内容可能未生效）' };
 
+    // 实测（2026-11-17）：发送按钮 .click() 合成点击不触发发送，Enter 键可靠。
+    // 双保险：先点按钮，1.2 秒后输入框仍有内容（未发出）则补发 Enter 键事件。
     btn.click();
-    await sleep(rnd(1000, 1800));
+    await sleep(rnd(1000, 1300));
+    if ((editor.innerText || '').trim()) {
+      editor.focus();
+      for (const type of ['keydown', 'keypress', 'keyup']) {
+        editor.dispatchEvent(new KeyboardEvent(type, {
+          key: 'Enter', code: 'Enter', keyCode: 13, which: 13,
+          bubbles: true, cancelable: true
+        }));
+      }
+      await sleep(rnd(800, 1200));
+    }
     return { ok: true };
   }
 

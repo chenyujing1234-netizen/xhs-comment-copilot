@@ -1013,11 +1013,15 @@ async function runTask(cfg) {
                     }
                     log('info', `准备给「${target.name}」发私信：${dm}`);
                     await humanSleep(settings.dmDelayMin, settings.dmDelayMax, '私信前随机间隔');
-                    // 整页导航到用户主页（SPA 内跳转/返回不可靠，之后统一回到搜索页）
-                    await navigateAndWait(tab.id, target.userUrl);
-                    const profileReady = await waitForPageType(tab.id, 'profile', 20000);
-                    if (!profileReady) {
-                      log('warn', `「${target.name}」主页加载超时，跳过私信`);
+                    // 实测：主页「发消息」按钮点击不稳定，直接进入与该用户的会话页 /chat/{userId} 最可靠
+                    // （userId 与主页链接中的一致；拿不到 userId 时退回主页，由 content 点「发消息」）
+                    const dmUrl = target.userId
+                      ? 'https://www.xiaohongshu.com/chat/' + encodeURIComponent(target.userId)
+                      : target.userUrl;
+                    await navigateAndWait(tab.id, dmUrl);
+                    const chatReady = await waitForPageType(tab.id, 'chat', 25000);
+                    if (!chatReady) {
+                      log('warn', `「${target.name}」私信页加载超时，跳过私信`);
                       reportEvent('dm', {
                         phone: cfg.phone || '',
                         run_id: reportRunId,
@@ -1028,11 +1032,11 @@ async function runTask(cfg) {
                         target_user_id: target.userId || '',
                         dm_text: dm,
                         ok: false,
-                        error: '主页加载超时'
+                        error: '私信页加载超时'
                       });
                       continue;
                     }
-                    await humanSleep(2, 4, '浏览对方主页');
+                    await humanSleep(2, 4, '等待会话窗口就绪');
                     const dr = await sendContent(tab.id, { type: 'SEND_DM', text: dm });
                     if (dr && dr.ok) {
                       totalDMs++;
