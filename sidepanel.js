@@ -106,8 +106,9 @@ function renderStatus() {
   if (t.running && p.keywordTotal) {
     const total = p.total || (p.keywordTotal * (p.noteTotal || 1));
     const done = (p.keyword - 1) * (p.noteTotal || 1) + (p.note || 0);
+    const productPart = p.productTotal > 1 ? `产品 ${p.product}/${p.productTotal} · ` : '';
     $('progressText').textContent =
-      `关键词 ${p.keyword}/${p.keywordTotal} · 视频 ${p.note || 0}/${p.noteTotal || 0} · 已评论 ${p.done || 0}`;
+      productPart + `关键词 ${p.keyword}/${p.keywordTotal} · 视频 ${p.note || 0}/${p.noteTotal || 0} · 已评论 ${p.done || 0}`;
     const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
     $('progressBar').style.width = pct + '%';
   } else if (t.running) {
@@ -323,7 +324,49 @@ function bindLoginEvents() {
 
 // ===== 关键词 =====
 function fillKeywordsForm() {
-  $('keywordsInput').value = (state.keywords || []).join('\n');
+  $('keywordsInput').value = (state.keywords || []).map((k) => k.text).join('\n');
+  updateKeywordOwnerHint();
+}
+
+// 把输入框里的每一行与已有关键词对象对应，保留产品归属；
+// 手动新增/编辑的行归入当前勾选的第一个产品（单产品时无歧义）
+function collectKeywordsFromInput() {
+  const products = collectProductsFromDOM().filter((p) => p.selected && p.name);
+  const first = products[0];
+  const known = new Map((state.keywords || []).map((k) => [k.text, k]));
+  const out = [];
+  const lines = $('keywordsInput').value.split('\n').map((s) => s.trim()).filter(Boolean);
+  for (const text of lines) {
+    const hit = known.get(text);
+    if (hit && hit.productId) {
+      out.push(hit);
+      continue;
+    }
+    out.push({ text, productId: first ? first.id : '', productName: first ? first.name : '' });
+  }
+  return out;
+}
+
+// 输入框下方提示：每个产品各有多少个关键词（任务会按产品分组执行）
+function updateKeywordOwnerHint() {
+  const products = collectProductsFromDOM().filter((p) => p.selected && p.name);
+  const counts = new Map();
+  for (const k of state.keywords || []) {
+    const key = k.productName || '未归属';
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  if (!counts.size) {
+    $('kwhint').textContent = '建议 10~15 个；多个产品时按产品分别生成，任务一个产品一个产品地跑';
+    return;
+  }
+  const parts = [];
+  for (const p of products) {
+    const n = counts.get(p.name) || 0;
+    if (n) parts.push(`${p.name} ${n} 个`);
+  }
+  const unknown = counts.get('未归属') || 0;
+  if (unknown) parts.push(`未归属 ${unknown} 个（按第一个勾选产品执行）`);
+  $('kwhint').textContent = '归属：' + (parts.join(' · ') || '无');
 }
 
 // ===== 初始化 =====
@@ -382,14 +425,14 @@ function bindEvents() {
     if (r.ok && r.keywords && r.keywords.length) {
       state.keywords = r.keywords;
       fillKeywordsForm();
-      flash('已生成 ' + r.keywords.length + ' 个关键词', true);
+      flash(`已生成 ${r.keywords.length} 个关键词（${products.length > 1 ? '按产品分别生成' : '单个产品'}）`, true);
     } else {
       flash('生成失败：' + (r.error || '未知'), false);
     }
   });
   $('btnClearKeywords').addEventListener('click', () => { $('keywordsInput').value = ''; });
   $('btnSaveKeywords').addEventListener('click', async () => {
-    const keywords = $('keywordsInput').value.split('\n').map((s) => s.trim()).filter(Boolean);
+    const keywords = collectKeywordsFromInput();
     state.keywords = keywords;
     const r = await send({ type: 'SAVE_KEYWORDS', keywords });
     flash(r.ok ? '关键词已保存' : ('保存失败：' + r.error), r.ok);
@@ -398,7 +441,7 @@ function bindEvents() {
   // 运行控制
   $('btnStart').addEventListener('click', async () => {
     const products = collectProductsFromDOM().filter((p) => p.selected && p.name);
-    const keywords = $('keywordsInput').value.split('\n').map((s) => s.trim()).filter(Boolean);
+    const keywords = collectKeywordsFromInput();
     if (!products.length) return flash('请先在「产品」页勾选并填写产品', false);
     if (!keywords.length) return flash('请先填写关键词（或 AI 生成）', false);
 

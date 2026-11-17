@@ -122,8 +122,20 @@ async function getProducts() {
 async function saveProducts(p) {
   await storageSet({ products: p || [] });
 }
+// 关键词统一规范为 {text, productId, productName}：带产品归属，任务按产品分组执行
+// 兼容旧数据（历史上存的是纯字符串数组）
+function normalizeKeywords(list) {
+  return (Array.isArray(list) ? list : [])
+    .map((k) => (typeof k === 'string' ? { text: k } : k))
+    .filter((k) => k && String(k.text || '').trim())
+    .map((k) => ({
+      text: String(k.text).trim(),
+      productId: k.productId || '',
+      productName: k.productName || ''
+    }));
+}
 async function getKeywords() {
-  return (await storageGet('keywords', [])) || [];
+  return normalizeKeywords(await storageGet('keywords', []));
 }
 async function saveKeywords(k) {
   await storageSet({ keywords: k || [] });
@@ -365,17 +377,15 @@ async function callLLM(messages, opts = {}) {
 // 核心原则：只生成"产品真能满足搜索者需求"的关键词。
 // 先让模型盘点产品真实能力与做不到的事，再据此生成关键词并自检，
 // 避免出现与产品无关、或产品根本满足不了搜索者需求的词。
-async function generateKeywords(products) {
-  const prodText = products
-    .map((p, i) => `产品${i + 1}\n名称：${p.name}\n描述：${p.description}`)
-    .join('\n\n');
-
+// ===== 关键词生成（按产品逐个生成，保证关键词与产品一一对应）=====
+async function generateKeywordsForProduct(product) {
   const sys =
     '你是小红书搜索行为分析专家。你的唯一标准是：搜这个词的人，是不是这个产品的潜在客户，' +
     '并且他的需求这个产品是否真的能满足。产品做不到的需求，一概不生成对应关键词。';
 
   const user =
-    '以下是我的产品信息：\n\n' + prodText + '\n\n' +
+    '产品名称：' + product.name + '\n' +
+    '产品描述：' + product.description + '\n\n' +
     '请严格分三步生成小红书搜索关键词。\n\n' +
     '第一步：能力盘点（只能从产品描述中提炼，不能臆测产品没有的功能）\n' +
     '1. 列出产品 3~6 个真实能力；\n' +
@@ -418,6 +428,40 @@ async function generateKeywords(products) {
     capabilities: clean(parsed && parsed.capabilities),
     cannotDo: clean(parsed && parsed.cannotDo)
   };
+}
+
+// 多产品：逐个产品生成，关键词带上产品归属，任务执行时按产品分组，评论/回复不会串产品
+async function generateKeywords(products) {
+  const out = [];
+  const allCaps = [];
+  const allCannot = [];
+  for (let i = 0; i < products.length; i++) {
+    const p = products[i];
+    log('info', `[产品 ${i + 1}/${products.length}] 正在为其生成关键词：${p.name}`);
+    let r;
+    try {
+      r = await generateKeywordsForProduct(p);
+    } catch (e) {
+      log('warn', `产品「${p.name}」关键词生成失败：${e.message}`);
+      continue;
+    }
+    if (r.capabilities.length) log('info', `「${p.name}」能力盘点：` + r.capabilities.join('；'));
+    if (r.cannotDo.length) log('info', `「${p.name}」做不到（相关词已排除）：` + r.cannotDo.join('；'));
+    for (const kw of r.keywords) {
+      out.push({ text: kw, productId: p.id, productName: p.name });
+    }
+    allCaps.push(...r.capabilities);
+    allCannot.push(...r.cannotDo);
+    log('success', `「${p.name}」生成 ${r.keywords.length} 个关键词`);
+  }
+  // 同一关键词被多个产品生成时只保留第一个，避免重复搜索
+  const seen = new Set();
+  const dedup = out.filter((k) => {
+    if (seen.has(k.text)) return false;
+    seen.add(k.text);
+    return true;
+  });
+  return { keywords: dedup, capabilities: allCaps, cannotDo: allCannot };
 }
 
 // ===== 评论生成 =====
@@ -634,12 +678,6 @@ async function waitWhilePaused() {
   }
 }
 
-function pickProduct(products) {
-  // 多个产品时随机挑选一个用于本次评论，增加多样性
-  if (!products || !products.length) return { name: '产品', description: '' };
-  return products[Math.floor(Math.random() * products.length)];
-}
-
 async function isAlreadyCommented(noteId) {
   const list = await getCommentedNotes();
   return list.some((n) => n.id === noteId);
@@ -672,11 +710,25 @@ async function runTask(cfg) {
   task.running = true;
   task.paused = false;
   task.stopRequested = false;
-  task.progress = { keyword: 0, keywordTotal: cfg.keywords.length, note: 0, noteTotal: 0, done: 0, total: 0 };
+
+  // 按产品分组：一个产品一个产品地跑，关键词/评论/回复都属于同一个产品，不会张冠李戴
+  const products = cfg.products || [];
+  const groups = buildProductGroups(products, cfg.keywords || [], settings.maxKeywordsPerTask);
+  if (!groups.length) {
+    log('error', '任务未启动：所选产品没有任何归属关键词，请先在「关键词」页生成');
+    task.running = false;
+    task.paused = false;
+    broadcastState();
+    return;
+  }
+  const allKeywordCount = groups.reduce((n, g) => n + g.keywords.length, 0);
+  task.progress = {
+    product: 0, productTotal: groups.length,
+    keyword: 0, keywordTotal: allKeywordCount,
+    note: 0, noteTotal: 0, done: 0, total: 0
+  };
   broadcastState();
 
-  const keywords = (cfg.keywords || []).slice(0, settings.maxKeywordsPerTask);
-  const products = cfg.products || [];
   let totalComments = 0;
   let totalReplies = 0;
   let totalVideos = 0;
@@ -685,218 +737,234 @@ async function runTask(cfg) {
   try {
     const rs = await reportEvent('task-start', {
       phone: cfg.phone || '',
-      keywords,
+      keywords: groups.reduce((arr, g) => arr.concat(g.keywords.map((k) => k.text)), []),
       products: products.map((p) => p.name || '')
     });
     if (rs && rs.ok && rs.run_id) reportRunId = rs.run_id;
   } catch (e) { /* 上报失败不影响任务 */ }
 
-  log('info', `任务开始：${keywords.length} 个关键词，${products.length} 个产品，账号：${cfg.phone || '未登录'}`);
+  log('info', `任务开始：${groups.length} 个产品、共 ${allKeywordCount} 个关键词，账号：${cfg.phone || '未登录'}`);
+  log('info', '执行顺序：' + groups.map((g) => `${g.product.name}（${g.keywords.length} 词）`).join(' → '));
 
   try {
     const tab = await ensureTab();
 
-    for (let ki = 0; ki < keywords.length; ki++) {
+    // 外层按产品：一个产品跑完（它的全部关键词）再跑下一个产品
+    for (let gi = 0; gi < groups.length; gi++) {
       if (task.stopRequested) break;
-      await waitWhilePaused();
-      const kw = keywords[ki];
-      task.progress.keyword = ki + 1;
+      const group = groups[gi];
+      const product = group.product; // 本组所有评论/回复都用这个产品
+      task.progress.product = gi + 1;
       broadcastState();
+      log('info', `[产品 ${gi + 1}/${groups.length}] ${product.name}：${group.keywords.length} 个关键词，评论与回复均按该产品生成`);
 
-      log('info', `[关键词 ${ki + 1}/${keywords.length}] 搜索：${kw}`);
-      await navigateAndWait(tab.id, searchUrl(kw));
-      const ready = await waitForContentReady(tab.id);
-      if (!ready) {
-        log('warn', '页面加载超时，跳过该关键词');
-        continue;
-      }
-      await humanSleep(settings.searchDelayMin, settings.searchDelayMax, '浏览搜索结果');
-
-      const r = await sendContent(tab.id, {
-        type: 'COLLECT_SEARCH_RESULTS',
-        max: settings.maxVideosPerKeyword,
-        scrollTimes: settings.scrollTimes
-      });
-      const notes = (r && r.notes) || [];
-      totalVideos += notes.length;
-      task.progress.noteTotal = notes.length;
-      task.progress.note = 0;
-      log('info', `找到 ${notes.length} 个视频`);
-
-      for (let ni = 0; ni < notes.length; ni++) {
+      for (let ki = 0; ki < group.keywords.length; ki++) {
         if (task.stopRequested) break;
         await waitWhilePaused();
-        const note = notes[ni];
-        task.progress.note = ni + 1;
+        const kw = group.keywords[ki].text;
+        task.progress.keyword++;
         broadcastState();
 
-        // 去重：已评论过的跳过
-        if (settings.skipCommented && (await isAlreadyCommented(note.id))) {
-          log('info', `[视频 ${ni + 1}/${notes.length}] 已评论过，跳过：${note.title || note.id}`);
+        log('info', `[产品 ${gi + 1}/${groups.length} · 关键词 ${ki + 1}/${group.keywords.length}] 搜索：${kw}`);
+        await navigateAndWait(tab.id, searchUrl(kw));
+        const ready = await waitForContentReady(tab.id);
+        if (!ready) {
+          log('warn', '页面加载超时，跳过该关键词');
           continue;
         }
+        await humanSleep(settings.searchDelayMin, settings.searchDelayMax, '浏览搜索结果');
 
-        log('info', `[视频 ${ni + 1}/${notes.length}] 打开：${note.title || note.id}`);
-        // 点击笔记卡片（SPA 跳转），避免冷跳转触发反爬 300031
-        const openRes = await sendContent(tab.id, { type: 'OPEN_NOTE', id: note.id });
-        if (!openRes || !openRes.ok) {
-          log('warn', '打开笔记失败：' + ((openRes && openRes.error) || '未知'));
-          continue;
-        }
-        const ready2 = await waitForPageType(tab.id, 'note');
-        if (!ready2) {
-          // 读取当前 URL，判断是否触发反爬（300031/404），便于后续排查
-          const st = await sendContent(tab.id, { type: 'PING' });
-          const curUrl = (st && st.url) || '';
-          const blocked = /error_code=300031|current_note|sec_|404/.test(curUrl);
-          log('warn', (blocked ? '笔记打开被反爬拦截（300031）' : '视频页加载超时') + '，跳过。当前页面：' + (curUrl || '未知'));
-          continue;
-        }
-        await humanSleep(settings.noteOpenDelayMin, settings.noteOpenDelayMax, '阅读视频内容');
-
-        const info = await sendContent(tab.id, { type: 'GET_NOTE_INFO' });
-        if (!info || !info.ok) {
-          log('warn', '无法读取视频信息，跳过');
-          continue;
-        }
-        log('info', `视频标题：${info.title || '(空)'} | 作者：${info.author || '(未知)'}`);
-
-        const product = pickProduct(products);
-        let comment;
-        try {
-          comment = await generateComment(product, info);
-        } catch (e) {
-          log('error', `评论生成失败：${e.message}`);
-          continue;
-        }
-        log('info', `生成评论：${comment}`);
-
-        const res = await sendContent(tab.id, { type: 'POST_COMMENT', text: comment });
-        if (res && res.ok) {
-          totalComments++;
-          task.progress.done = totalComments;
-          log('success', `评论已发布`);
-        } else {
-          log('error', `评论发布失败：${(res && res.error) || '未知原因'}`);
-        }
-
-        // 上报评论事件（含视频 URL，便于日后回看是否有回复）
-        reportEvent('comment', {
-          phone: cfg.phone || '',
-          run_id: reportRunId,
-          note_id: note.id,
-          note_url: note.url || '',
-          note_title: info.title || '',
-          note_author: info.author || '',
-          keyword: kw,
-          product_name: product.name || '',
-          comment_text: comment,
-          ok: !!(res && res.ok),
-          error: (res && res.ok) ? '' : ((res && res.error) || '未知原因')
+        const r = await sendContent(tab.id, {
+          type: 'COLLECT_SEARCH_RESULTS',
+          max: settings.maxVideosPerKeyword,
+          scrollTimes: settings.scrollTimes
         });
+        const notes = (r && r.notes) || [];
+        totalVideos += notes.length;
+        task.progress.noteTotal = notes.length;
+        task.progress.note = 0;
+        log('info', `找到 ${notes.length} 个视频`);
 
-        await recordCommented(note.id, {
-          title: info.title || '',
-          comment,
-          url: note.url,
-          keyword: kw,
-          product: product.name,
-          phone: cfg.phone || ''
-        });
-
-        // ===== 回复评论区里对产品感兴趣的用户 =====
-        // 仅在主评论发布成功后进行；失败不影响主流程
-        if (settings.enableCommentReply && res && res.ok && !task.stopRequested) {
+        for (let ni = 0; ni < notes.length; ni++) {
+          if (task.stopRequested) break;
           await waitWhilePaused();
-          try {
-            const cRes = await sendContent(tab.id, { type: 'GET_COMMENTS', max: 12 });
-            const allComments = (cRes && cRes.ok && cRes.comments) || [];
-            // 排除自己刚发的主评论
-            const others = allComments.filter((c) => c.content !== comment);
-            log('info', `评论区共 ${others.length} 条其他用户评论，开始分析兴趣`);
+          const note = notes[ni];
+          task.progress.note = ni + 1;
+          broadcastState();
 
-            // 过滤已回复过的（同一笔记 + 同昵称 + 同内容）
-            const fresh = [];
-            for (const c of others) {
-              if (await isAlreadyReplied(note.id, c.name, c.content)) continue;
-              if (c.hasReply === false) continue; // 找不到回复按钮的跳过
-              fresh.push(c);
-            }
-            if (!fresh.length) {
-              log('info', '没有可回复的新评论');
-            } else {
-              let interested = [];
-              try {
-                interested = await analyzeInterestedComments(product, info, fresh);
-              } catch (e) {
-                log('warn', `评论兴趣分析失败：${e.message}`);
-              }
-              const picked = interested.slice(0, settings.maxRepliesPerNote);
-              if (!picked.length) {
-                log('info', '未发现对产品感兴趣的用户评论');
-              }
-              for (const p of picked) {
-                if (task.stopRequested) break;
-                await waitWhilePaused();
-                // 注意：LLM 返回的 index 是评论自身的 index 字段（DOM 位置），不是 fresh 数组下标
-                const target = fresh.find((c) => c.index === p.index);
-                if (!target) continue;
-                log('info', `发现感兴趣用户「${target.name}」：${target.content.slice(0, 30)}${p.reason ? '（' + p.reason + '）' : ''}`);
-                let reply;
-                try {
-                  reply = await generateReply(product, info, target);
-                } catch (e) {
-                  log('error', `回复内容生成失败：${e.message}`);
-                  continue;
-                }
-                if (!reply) {
-                  log('warn', '回复内容为空，跳过');
-                  continue;
-                }
-                log('info', `生成回复：${reply}`);
-                await humanSleep(settings.replyDelayMin, settings.replyDelayMax, '回复前随机间隔');
-                const rr = await sendContent(tab.id, { type: 'REPLY_COMMENT', index: target.index, text: reply });
-                if (rr && rr.ok) {
-                  totalReplies++;
-                  log('success', `已回复「${target.name}」`);
-                  await recordRepliedComment(note.id, target.name, target.content, reply, cfg.phone);
-                } else {
-                  log('error', `回复「${target.name}」失败：${(rr && rr.error) || '未知原因'}`);
-                }
-                // 上报回复事件
-                reportEvent('reply', {
-                  phone: cfg.phone || '',
-                  run_id: reportRunId,
-                  note_id: note.id,
-                  note_url: note.url || '',
-                  note_title: info.title || '',
-                  target_name: target.name,
-                  target_content: target.content,
-                  reply_text: reply,
-                  ok: !!(rr && rr.ok),
-                  error: (rr && rr.ok) ? '' : ((rr && rr.error) || '未知原因')
-                });
-              }
-            }
+          // 去重：已评论过的跳过
+          if (settings.skipCommented && (await isAlreadyCommented(note.id))) {
+            log('info', `[视频 ${ni + 1}/${notes.length}] 已评论过，跳过：${note.title || note.id}`);
+            continue;
+          }
+
+          log('info', `[视频 ${ni + 1}/${notes.length}] 打开：${note.title || note.id}`);
+          // 点击笔记卡片（SPA 跳转），避免冷跳转触发反爬 300031
+          const openRes = await sendContent(tab.id, { type: 'OPEN_NOTE', id: note.id });
+          if (!openRes || !openRes.ok) {
+            log('warn', '打开笔记失败：' + ((openRes && openRes.error) || '未知'));
+            continue;
+          }
+          const ready2 = await waitForPageType(tab.id, 'note');
+          if (!ready2) {
+            // 读取当前 URL，判断是否触发反爬（300031/404），便于后续排查
+            const st = await sendContent(tab.id, { type: 'PING' });
+            const curUrl = (st && st.url) || '';
+            const blocked = /error_code=300031|current_note|sec_|404/.test(curUrl);
+            log('warn', (blocked ? '笔记打开被反爬拦截（300031）' : '视频页加载超时') + '，跳过。当前页面：' + (curUrl || '未知'));
+            continue;
+          }
+          await humanSleep(settings.noteOpenDelayMin, settings.noteOpenDelayMax, '阅读视频内容');
+
+          const info = await sendContent(tab.id, { type: 'GET_NOTE_INFO' });
+          if (!info || !info.ok) {
+            log('warn', '无法读取视频信息，跳过');
+            continue;
+          }
+          log('info', `视频标题：${info.title || '(空)'} | 作者：${info.author || '(未知)'}`);
+
+          let comment;
+          try {
+            comment = await generateComment(product, info);
           } catch (e) {
-            log('error', `评论回复环节异常：${e.message}`);
+            log('error', `评论生成失败：${e.message}`);
+            continue;
+          }
+          log('info', `生成评论：${comment}`);
+
+          const res = await sendContent(tab.id, { type: 'POST_COMMENT', text: comment });
+          if (res && res.ok) {
+            totalComments++;
+            task.progress.done = totalComments;
+            log('success', `评论已发布`);
+          } else {
+            log('error', `评论发布失败：${(res && res.error) || '未知原因'}`);
+          }
+
+          // 上报评论事件（含视频 URL，便于日后回看是否有回复）
+          reportEvent('comment', {
+            phone: cfg.phone || '',
+            run_id: reportRunId,
+            note_id: note.id,
+            note_url: note.url || '',
+            note_title: info.title || '',
+            note_author: info.author || '',
+            keyword: kw,
+            product_name: product.name || '',
+            comment_text: comment,
+            ok: !!(res && res.ok),
+            error: (res && res.ok) ? '' : ((res && res.error) || '未知原因')
+          });
+
+          await recordCommented(note.id, {
+            title: info.title || '',
+            comment,
+            url: note.url,
+            keyword: kw,
+            product: product.name,
+            phone: cfg.phone || ''
+          });
+
+          // ===== 回复评论区里对产品感兴趣的用户 =====
+          // 仅在主评论发布成功后进行；失败不影响主流程；与主评论同一个产品
+          if (settings.enableCommentReply && res && res.ok && !task.stopRequested) {
+            await waitWhilePaused();
+            try {
+              const cRes = await sendContent(tab.id, { type: 'GET_COMMENTS', max: 12 });
+              const allComments = (cRes && cRes.ok && cRes.comments) || [];
+              // 排除自己刚发的主评论
+              const others = allComments.filter((c) => c.content !== comment);
+              log('info', `评论区共 ${others.length} 条其他用户评论，开始分析兴趣`);
+
+              // 过滤已回复过的（同一笔记 + 同昵称 + 同内容）
+              const fresh = [];
+              for (const c of others) {
+                if (await isAlreadyReplied(note.id, c.name, c.content)) continue;
+                if (c.hasReply === false) continue; // 找不到回复按钮的跳过
+                fresh.push(c);
+              }
+              if (!fresh.length) {
+                log('info', '没有可回复的新评论');
+              } else {
+                let interested = [];
+                try {
+                  interested = await analyzeInterestedComments(product, info, fresh);
+                } catch (e) {
+                  log('warn', `评论兴趣分析失败：${e.message}`);
+                }
+                const picked = interested.slice(0, settings.maxRepliesPerNote);
+                if (!picked.length) {
+                  log('info', '未发现对产品感兴趣的用户评论');
+                }
+                for (const p of picked) {
+                  if (task.stopRequested) break;
+                  await waitWhilePaused();
+                  // 注意：LLM 返回的 index 是评论自身的 index 字段（DOM 位置），不是 fresh 数组下标
+                  const target = fresh.find((c) => c.index === p.index);
+                  if (!target) continue;
+                  log('info', `发现感兴趣用户「${target.name}」：${target.content.slice(0, 30)}${p.reason ? '（' + p.reason + '）' : ''}`);
+                  let reply;
+                  try {
+                    reply = await generateReply(product, info, target);
+                  } catch (e) {
+                    log('error', `回复内容生成失败：${e.message}`);
+                    continue;
+                  }
+                  if (!reply) {
+                    log('warn', '回复内容为空，跳过');
+                    continue;
+                  }
+                  log('info', `生成回复：${reply}`);
+                  await humanSleep(settings.replyDelayMin, settings.replyDelayMax, '回复前随机间隔');
+                  const rr = await sendContent(tab.id, { type: 'REPLY_COMMENT', index: target.index, text: reply });
+                  if (rr && rr.ok) {
+                    totalReplies++;
+                    log('success', `已回复「${target.name}」`);
+                    await recordRepliedComment(note.id, target.name, target.content, reply, cfg.phone);
+                  } else {
+                    log('error', `回复「${target.name}」失败：${(rr && rr.error) || '未知原因'}`);
+                  }
+                  // 上报回复事件
+                  reportEvent('reply', {
+                    phone: cfg.phone || '',
+                    run_id: reportRunId,
+                    note_id: note.id,
+                    note_url: note.url || '',
+                    note_title: info.title || '',
+                    target_name: target.name,
+                    target_content: target.content,
+                    reply_text: reply,
+                    ok: !!(rr && rr.ok),
+                    error: (rr && rr.ok) ? '' : ((rr && rr.error) || '未知原因')
+                  });
+                }
+              }
+            } catch (e) {
+              log('error', `评论回复环节异常：${e.message}`);
+            }
+          }
+
+          if (ni < notes.length - 1 && !task.stopRequested) {
+            // 返回搜索结果页，继续下一个笔记。
+            // 不要用 history.back()：小红书 SPA 的返回不可靠（页面常卡在加载态或实际未返回，
+            // 导致后续 openNote 找不到笔记卡片）。改为整页重新加载搜索地址：
+            // 重新加载会为所有笔记重新生成 xsec_token，点击打开更稳定。
+            await navigateAndWait(tab.id, searchUrl(kw));
+            const back = await waitForPageType(tab.id, 'search', 20000);
+            if (!back) log('warn', '搜索页重新加载超时，仍继续尝试');
+            await humanSleep(settings.commentIntervalMin, settings.commentIntervalMax, '评论间随机间隔');
           }
         }
 
-        if (ni < notes.length - 1 && !task.stopRequested) {
-          // 返回搜索结果页，继续下一个笔记。
-          // 不要用 history.back()：小红书 SPA 的返回不可靠（页面常卡在加载态或实际未返回，
-          // 导致后续 openNote 找不到笔记卡片）。改为整页重新加载搜索地址：
-          // 重新加载会为所有笔记重新生成 xsec_token，点击打开更稳定。
-          await navigateAndWait(tab.id, searchUrl(kw));
-          const back = await waitForPageType(tab.id, 'search', 20000);
-          if (!back) log('warn', '搜索页重新加载超时，仍继续尝试');
-          await humanSleep(settings.commentIntervalMin, settings.commentIntervalMax, '评论间随机间隔');
+        // 关键词之间休息；跨到最后一个关键词时若还有下一个产品，也休息
+        const isLastKeyword = gi === groups.length - 1 && ki === group.keywords.length - 1;
+        if (!isLastKeyword && !task.stopRequested) {
+          await humanSleep(
+            settings.keywordIntervalMin,
+            settings.keywordIntervalMax,
+            ki < group.keywords.length - 1 ? '切换关键词前休息' : '切换产品前休息'
+          );
         }
-      }
-
-      if (ki < keywords.length - 1 && !task.stopRequested) {
-        await humanSleep(settings.keywordIntervalMin, settings.keywordIntervalMax, '切换关键词前休息');
       }
     }
 
@@ -917,6 +985,29 @@ async function runTask(cfg) {
     task.paused = false;
     broadcastState();
   }
+}
+
+// 把关键词按产品归属分组：一个产品一组，组内所有关键词/评论/回复都用同一个产品
+// maxPerProduct：每个产品最多取前 N 个关键词（对应设置项 maxKeywordsPerTask）
+function buildProductGroups(products, keywords, maxPerProduct) {
+  const byId = new Map(products.map((p) => [p.id, p]));
+  const groups = new Map();
+  for (const k of keywords) {
+    let p = byId.get(k.productId);
+    if (!p) {
+      // 没有归属信息（如手动输入的关键词）：归入第一个勾选的产品
+      p = products[0];
+      if (p && products.length > 1) {
+        log('warn', `关键词「${k.text}」没有产品归属信息，暂归入「${p.name}」`);
+      }
+    }
+    if (!p) continue;
+    if (!groups.has(p.id)) groups.set(p.id, { product: p, keywords: [] });
+    const g = groups.get(p.id);
+    if (!maxPerProduct || g.keywords.length < maxPerProduct) g.keywords.push(k);
+  }
+  // 按产品在产品列表中的顺序输出，保证执行顺序稳定
+  return products.filter((p) => groups.has(p.id)).map((p) => groups.get(p.id));
 }
 
 // ===== 保活：定时心跳，避免长时间任务中 service worker 被回收 =====
@@ -1009,7 +1100,7 @@ async function handleMessage(msg, sender) {
       // 登录门禁：未通过手机号验证码登录不允许使用
       const auth = await getAuth();
       if (!auth || !auth.phone) return { ok: false, error: '请先使用手机号验证码登录' };
-      runTask({ products: msg.products, keywords: msg.keywords, phone: auth.phone });
+      runTask({ products: msg.products, keywords: normalizeKeywords(msg.keywords), phone: auth.phone });
       return { ok: true };
     case 'STOP_TASK':
       task.stopRequested = true;
