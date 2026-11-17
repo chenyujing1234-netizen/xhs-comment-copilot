@@ -212,6 +212,32 @@
           <button id="btnClearReplied" class="btn">清空回复记录</button>
         </div>
       </div>
+
+      <div class="card">
+        <div class="card-head"><span>评论后给感兴趣的用户发私信</span></div>
+        <div class="field checkbox">
+          <label><input id="enablePrivateMessage" type="checkbox" checked /> 启用：分析评论区找出对产品感兴趣的用户，进入其主页发送一对一私信，吸引对方主动联系</label>
+        </div>
+        <div class="field-grid">
+          <div class="field">
+            <label>每条视频最多私信数</label>
+            <input id="maxDMsPerNote" type="number" min="1" max="3" value="1" />
+          </div>
+          <div class="field">
+            <label>私信间隔(秒) 最小</label>
+            <input id="dmDelayMin" type="number" min="5" value="20" />
+          </div>
+          <div class="field">
+            <label>私信间隔(秒) 最大</label>
+            <input id="dmDelayMax" type="number" min="10" value="45" />
+          </div>
+        </div>
+        <div class="row">
+          <button id="btnSaveDm" class="btn btn-primary">保存私信设置</button>
+          <button id="btnClearDm" class="btn">清空私信记录</button>
+        </div>
+        <p class="test-result">同一用户只会私信一次；私信内容由 AI 结合对方评论生成，自然带出产品与官网。</p>
+      </div>
     </section>
   </main>
 

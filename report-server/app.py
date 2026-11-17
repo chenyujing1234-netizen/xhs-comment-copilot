@@ -1,7 +1,7 @@
 """小红书评论获客插件 - 运行数据上报服务。
 
 职责：
-1. 接收插件上报的运行事件（登录 / 任务开始 / 评论 / 回复 / 任务结束 / 产品同步），写入 MySQL；
+1. 接收插件上报的运行事件（登录 / 任务开始 / 评论 / 回复 / 私信 / 任务结束 / 产品同步），写入 MySQL；
 2. 提供运营看板页面，展示插件运行情况（评论数、回复数、视频、产品、关键词等）。
 
 部署：uvicorn app:app --host 0.0.0.0 --port 8081（systemd 托管）。
@@ -95,6 +95,21 @@ class TaskEndReport(BaseModel):
     run_id: int
     comments_total: int = 0
     replies_total: int = 0
+    dms_total: int = 0
+
+
+class DMReport(BaseModel):
+    """私信记录：给感兴趣的用户发的一对一私信"""
+    phone: str
+    run_id: int | None = None
+    note_id: str = ''
+    note_url: str = ''
+    note_title: str = ''
+    target_name: str = ''
+    target_user_id: str = ''
+    dm_text: str = ''
+    ok: bool = True
+    error: str = ''
 
 
 class ProductSyncReport(BaseModel):
@@ -281,9 +296,48 @@ def report_task_end(data: TaskEndReport):
     try:
         with conn.cursor() as cur:
             cur.execute(
-                'UPDATE task_runs SET status = %s, comments_total = %s, replies_total = %s, ended_at = %s '
+                'UPDATE task_runs SET status = %s, comments_total = %s, replies_total = %s, dms_total = %s, ended_at = %s '
                 'WHERE id = %s AND phone = %s',
-                ('finished', data.comments_total, data.replies_total, now_str(), data.run_id, data.phone.strip()),
+                (
+                    'finished',
+                    data.comments_total,
+                    data.replies_total,
+                    data.dms_total,
+                    now_str(),
+                    data.run_id,
+                    data.phone.strip(),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return {'ok': True}
+
+
+@app.post('/api/report/dm', dependencies=[Depends(check_api_key)])
+def report_dm(data: DMReport):
+    if not data.phone.strip():
+        raise HTTPException(status_code=400, detail='phone required')
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                'INSERT INTO dm_logs '
+                '(phone, run_id, note_id, note_url, note_title, target_name, target_user_id, dm_text, ok, error_msg, created_at) '
+                'VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)',
+                (
+                    data.phone.strip(),
+                    data.run_id,
+                    data.note_id[:64],
+                    data.note_url[:500],
+                    data.note_title[:255],
+                    data.target_name[:64],
+                    data.target_user_id[:64],
+                    data.dm_text[:500],
+                    1 if data.ok else 0,
+                    data.error[:255],
+                    now_str(),
+                ),
             )
         conn.commit()
     finally:
@@ -307,8 +361,10 @@ def dashboard(key: str = Query(default='')):
         with conn.cursor() as cur:
             c_total, c_ok = count_rows(cur, 'comment_logs')
             r_total, r_ok = count_rows(cur, 'reply_logs')
+            d_total, d_ok = count_rows(cur, 'dm_logs')
             c_today, _ = count_rows(cur, 'comment_logs', 'WHERE created_at >= CURDATE()')
             r_today, _ = count_rows(cur, 'reply_logs', 'WHERE created_at >= CURDATE()')
+            d_today, _ = count_rows(cur, 'dm_logs', 'WHERE created_at >= CURDATE()')
 
             # 最近 7 天趋势
             cur.execute(
@@ -321,8 +377,16 @@ def dashboard(key: str = Query(default='')):
                 'WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY) GROUP BY DATE(created_at)'
             )
             r_trend = {str(row['d']): int(row['c']) for row in cur.fetchall()}
+            cur.execute(
+                'SELECT DATE(created_at) AS d, COUNT(*) AS c FROM dm_logs '
+                'WHERE created_at >= DATE_SUB(CURDATE(), INTERVAL 6 DAY) GROUP BY DATE(created_at)'
+            )
+            d_trend = {str(row['d']): int(row['c']) for row in cur.fetchall()}
             days = [(datetime.now().date() - timedelta(days=i)).strftime('%Y-%m-%d') for i in range(6, -1, -1)]
-            trend = [{'date': d, 'comments': c_trend.get(d, 0), 'replies': r_trend.get(d, 0)} for d in days]
+            trend = [
+                {'date': d, 'comments': c_trend.get(d, 0), 'replies': r_trend.get(d, 0), 'dms': d_trend.get(d, 0)}
+                for d in days
+            ]
 
             # 按产品 / 关键词统计
             cur.execute(
@@ -367,7 +431,7 @@ def dashboard(key: str = Query(default='')):
 
             # 最近任务
             cur.execute(
-                'SELECT id, phone, keyword_total, product_total, comments_total, replies_total, status, started_at, ended_at '
+                'SELECT id, phone, keyword_total, product_total, comments_total, replies_total, dms_total, status, started_at, ended_at '
                 'FROM task_runs ORDER BY id DESC LIMIT 20'
             )
             runs = [
@@ -378,6 +442,7 @@ def dashboard(key: str = Query(default='')):
                     'product_total': int(row['product_total'] or 0),
                     'comments_total': int(row['comments_total'] or 0),
                     'replies_total': int(row['replies_total'] or 0),
+                    'dms_total': int(row['dms_total'] or 0),
                     'status': row['status'],
                     'started_at': fmt_dt(row['started_at']),
                     'ended_at': fmt_dt(row['ended_at']),
@@ -424,6 +489,25 @@ def dashboard(key: str = Query(default='')):
                 }
                 for row in cur.fetchall()
             ]
+            # 最近私信明细
+            cur.execute(
+                'SELECT created_at, phone, target_name, target_user_id, dm_text, note_title, note_url, ok, error_msg '
+                'FROM dm_logs ORDER BY id DESC LIMIT 50'
+            )
+            dms = [
+                {
+                    'time': fmt_dt(row['created_at'], '%m-%d %H:%M:%S'),
+                    'phone': row['phone'],
+                    'name': row['target_name'] or '',
+                    'user_id': row['target_user_id'] or '',
+                    'text': row['dm_text'] or '',
+                    'title': row['note_title'] or '',
+                    'url': row['note_url'] or '',
+                    'ok': bool(row['ok']),
+                    'error': row['error_msg'] or '',
+                }
+                for row in cur.fetchall()
+            ]
     finally:
         conn.close()
 
@@ -434,8 +518,11 @@ def dashboard(key: str = Query(default='')):
             'comment_ok': c_ok,
             'reply_total': r_total,
             'reply_ok': r_ok,
+            'dm_total': d_total,
+            'dm_ok': d_ok,
             'comment_today': c_today,
             'reply_today': r_today,
+            'dm_today': d_today,
             'device_count': len(devices),
             'product_count': len(products),
             'running_runs': sum(1 for r in runs if r['status'] == 'running'),
@@ -448,6 +535,7 @@ def dashboard(key: str = Query(default='')):
         'runs': runs,
         'comments': comments,
         'replies': replies,
+        'dms': dms,
     }
 
 

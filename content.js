@@ -225,6 +225,14 @@
 
   // 收集顶层评论。index 为在全部 .parent-comment 中的位置（回复时按此定位原评论）；
   // hasReply 标记该评论是否能找到「回复」入口，找不到的后台会跳过不回复。
+  function findUserProfile(block) {
+    const a = q('a[href*="/user/profile/"]', block);
+    if (!a) return null;
+    const href = a.href || '';
+    const m = href.match(/\/user\/profile\/([0-9a-zA-Z]+)/);
+    return { url: href, userId: m ? m[1] : '' };
+  }
+
   function collectComments(max) {
     let blocks = qa('.parent-comment');
     if (!blocks.length) blocks = qa('.comment-item');
@@ -238,11 +246,14 @@
       const key = name + '|' + content;
       if (seen.has(key)) continue;
       seen.add(key);
+      const profile = findUserProfile(el);
       items.push({
         index: i,
         name: name || '用户',
         content: content.slice(0, 120),
-        hasReply: !!findReplyButton(el)
+        hasReply: !!findReplyButton(el),
+        userUrl: profile ? profile.url : '',
+        userId: profile ? profile.userId : ''
       });
       if (items.length >= max) break;
     }
@@ -314,6 +325,80 @@
 
     btn.click();
     await sleep(rnd(900, 1600));
+    return { ok: true };
+  }
+
+  // ===== 用户主页：给感兴趣的用户发私信 =====
+  // 主页「私信」按钮文案一般为「私信」，点击后弹出会话窗口：输入框 contenteditable，发送按钮文案「发送」
+  function findDmButton() {
+    const cands = qa('button, span, div, a, [role="button"]');
+    let fallback = null;
+    for (const el of cands) {
+      const t = (el.innerText || '').trim();
+      if (t !== '私信' && t !== '发私信') continue;
+      const hasSmaller = qa('*', el).some((c) => {
+        const ct = (c.innerText || '').trim();
+        return ct === '私信' || ct === '发私信';
+      });
+      if (hasSmaller) continue;
+      const cls = el.getAttribute('class') || '';
+      if (/im|dm|message|chat/i.test(cls)) return el;
+      if (!fallback) fallback = el;
+    }
+    return fallback;
+  }
+
+  async function sendPrivateMessage(text) {
+    const dmBtn = findDmButton();
+    if (!dmBtn) {
+      return { ok: false, error: '用户主页未找到「私信」按钮（该用户可能不接受私信）' };
+    }
+    dmBtn.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    await sleep(rnd(400, 800));
+    dmBtn.click();
+    await sleep(rnd(1200, 2000));
+
+    // 等会话输入框出现：优先私信窗口内的 contenteditable，最后兜底取页面最后一个
+    let editor = null;
+    for (let i = 0; i < 10; i++) {
+      editor =
+        q('[class*="im-chat"] [contenteditable="true"]') ||
+        q('[class*="chat"] [contenteditable="true"]') ||
+        q('[placeholder*="私信"]') ||
+        q('[placeholder*="说点什么"]') ||
+        (qa('[contenteditable="true"]').slice(-1)[0] || null);
+      if (editor) break;
+      await sleep(rnd(400, 700));
+    }
+    if (!editor) return { ok: false, error: '私信输入框未出现（点击「私信」未生效或该用户不接受私信）' };
+
+    // 安全检查：输入框非空说明定位错了，中止以防发错
+    const existing = (editor.innerText || '').trim();
+    if (existing) {
+      return { ok: false, error: '私信输入框非空，已中止以防发错：' + existing.slice(0, 20) };
+    }
+
+    editor.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    await sleep(rnd(300, 600));
+    editor.click();
+    editor.focus();
+    await sleep(rnd(300, 600));
+    try { editor.innerHTML = ''; } catch (e) { /* ignore */ }
+
+    // 逐字模拟打字
+    for (const ch of text) {
+      document.execCommand('insertText', false, ch);
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: ch }));
+      await sleep(rnd(45, 170));
+    }
+    await sleep(rnd(800, 1400));
+
+    const btn = findSubmitNear(editor);
+    if (!btn) return { ok: false, error: '未找到私信发送按钮' };
+    if (isSubmitDisabled(btn)) return { ok: false, error: '私信发送按钮不可用（内容可能未生效）' };
+
+    btn.click();
+    await sleep(rnd(1000, 1800));
     return { ok: true };
   }
 
@@ -400,6 +485,10 @@
           }
           case 'REPLY_COMMENT': {
             return await replyToComment(msg.index, msg.text || '');
+          }
+          case 'SEND_DM': {
+            // 在用户主页发送私信（由后台导航到 /user/profile/ 后调用）
+            return await sendPrivateMessage(msg.text || '');
           }
           default:
             return { ok: false, error: '未知消息类型：' + msg.type };

@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS task_runs (
   product_total INT NOT NULL DEFAULT 0,
   comments_total INT NOT NULL DEFAULT 0,
   replies_total INT NOT NULL DEFAULT 0,
+  dms_total INT NOT NULL DEFAULT 0,
   status VARCHAR(20) NOT NULL DEFAULT 'running',
   started_at DATETIME NOT NULL,
   ended_at DATETIME NULL,
@@ -57,6 +58,24 @@ CREATE TABLE IF NOT EXISTS reply_logs (
   target_name VARCHAR(64) NOT NULL DEFAULT '',
   target_content VARCHAR(500) NOT NULL DEFAULT '',
   reply_text VARCHAR(500) NOT NULL DEFAULT '',
+  ok TINYINT NOT NULL DEFAULT 1,
+  error_msg VARCHAR(255) NOT NULL DEFAULT '',
+  created_at DATETIME NOT NULL,
+  KEY idx_phone (phone),
+  KEY idx_created (created_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 私信记录：给哪个感兴趣的用户发了私信、内容是什么
+CREATE TABLE IF NOT EXISTS dm_logs (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  phone VARCHAR(20) NOT NULL,
+  run_id BIGINT NULL,
+  note_id VARCHAR(64) NOT NULL DEFAULT '',
+  note_url VARCHAR(500) NOT NULL DEFAULT '',
+  note_title VARCHAR(255) NOT NULL DEFAULT '',
+  target_name VARCHAR(64) NOT NULL DEFAULT '',
+  target_user_id VARCHAR(64) NOT NULL DEFAULT '',
+  dm_text VARCHAR(500) NOT NULL DEFAULT '',
   ok TINYINT NOT NULL DEFAULT 1,
   error_msg VARCHAR(255) NOT NULL DEFAULT '',
   created_at DATETIME NOT NULL,

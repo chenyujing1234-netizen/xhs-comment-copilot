@@ -27,14 +27,18 @@ echo '== 4. reply =='
 curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d "{\"phone\":\"22644212509\",\"run_id\":$RID,\"note_id\":\"68f3a1b2012345678901234\",\"note_url\":\"https://www.xiaohongshu.com/search_result/68f3a1b2012345678901234?xsec_token=ABxxx\",\"note_title\":\"换手机后微信聊天记录怎么找回\",\"target_name\":\"芒果小鹿\",\"target_content\":\"求问怎么备份微信聊天记录，怕换手机丢了\",\"reply_text\":\"我之前也怕，后来用本地归档存的，想了解的话私我\",\"ok\":true}" $B/api/report/reply
 echo
 
-echo '== 5. task-end =='
-curl -s -X POST -H "$H" -H 'Content-Type: application/json' \
-  -d "{\"phone\":\"22644212509\",\"run_id\":$RID,\"comments_total\":1,\"replies_total\":1}" $B/api/report/task-end
+echo '== 5. dm =='
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' -d "{\"phone\":\"22644212509\",\"run_id\":$RID,\"note_id\":\"68f3a1b2012345678901234\",\"note_url\":\"https://www.xiaohongshu.com/search_result/68f3a1b2012345678901234?xsec_token=ABxxx\",\"note_title\":\"换手机后微信聊天记录怎么找回\",\"target_name\":\"芒果小鹿\",\"target_user_id\":\"5f8a1c2e0000000001234567\",\"dm_text\":\"刚在视频下看到你说怕换手机丢记录，我之前也愁，后来本地归档搞定的，你想了解的话我细说\",\"ok\":true}" $B/api/report/dm
 echo
 
-echo '== 6. dashboard summary =='
+echo '== 6. task-end =='
+curl -s -X POST -H "$H" -H 'Content-Type: application/json' \
+  -d "{\"phone\":\"22644212509\",\"run_id\":$RID,\"comments_total\":1,\"replies_total\":1,\"dms_total\":1}" $B/api/report/task-end
+echo
+
+echo '== 7. dashboard summary =='
 curl -s "$B/api/dashboard?key=$K" | sed 's/,"comments".*//'
 echo
-echo '== 7. dashboard page =='
+echo '== 8. dashboard page =='
 curl -s -o /dev/null -w 'GET /xhs-report/ -> %{http_code}\n' "$B/"
 curl -s "$B/" | grep -c '运营看板' || true

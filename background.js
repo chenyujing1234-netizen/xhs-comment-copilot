@@ -3,11 +3,8 @@
 
 const DEFAULT_SETTINGS = {
   baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
-  // 密钥一律不放默认值：请在「设置 → 模型与接口设置」中填写自己的 Key
+  // 大模型 Key 不放默认值：请在「设置 → 模型与接口设置」中填写自己的 Key
   apiKey: '',
-  // 阿里云短信（登录验证码）AccessKey，同样在设置页填写
-  smsAccessKeyId: '',
-  smsAccessKeySecret: '',
   model: 'qwen3.7-plus',
   commentMaxLen: 25,
   commentMinLen: 6,
@@ -29,6 +26,11 @@ const DEFAULT_SETTINGS = {
   maxRepliesPerNote: 1,
   replyDelayMin: 15,
   replyDelayMax: 40,
+  // 评论后给感兴趣的用户发私信（进入其主页发送）
+  enablePrivateMessage: true,
+  maxDMsPerNote: 1,
+  dmDelayMin: 20,
+  dmDelayMax: 45,
   // 运行数据上报服务（看板：http://124.221.115.174/xhs-report/?key=...）
   reportUrl: 'http://124.221.115.174/xhs-report',
   reportKey: 'xhs-report-2026'
@@ -77,7 +79,7 @@ const task = {
   running: false,
   paused: false,
   stopRequested: false,
-  progress: { keyword: 0, keywordTotal: 0, note: 0, noteTotal: 0, done: 0, total: 0 }
+  progress: { keyword: 0, keywordTotal: 0, note: 0, noteTotal: 0, done: 0, total: 0, dms: 0 }
 };
 
 let logs = [];           // 内存日志
@@ -143,8 +145,9 @@ async function saveKeywords(k) {
 
 // ===== 手机号 + 验证码登录（参考 ContextBuddy auth_service.py）=====
 // 阿里云短信 Dysmsapi 2017-05-25 SendSms（RPC 签名 V1，HMAC-SHA1）
-// AccessKey 在设置页填写（smsAccessKeyId / smsAccessKeySecret），不写死在代码里
 const SMS_CONFIG = {
+  accessKeyId: 'YOUR_ALIYUN_ACCESS_KEY_ID',
+  accessKeySecret: 'YOUR_ALIYUN_ACCESS_KEY_SECRET',
   signName: '哈希流光',
   templateCode: 'SMS_495955218'
 };
@@ -172,14 +175,8 @@ function bufToBase64(buf) {
 
 // 阿里云短信发送（RPC 签名 V1）。返回 {ok, error}
 async function aliyunSendSms(phone, code) {
-  const settings = await getSettings();
-  const accessKeyId = (settings.smsAccessKeyId || '').trim();
-  const accessKeySecret = (settings.smsAccessKeySecret || '').trim();
-  if (!accessKeyId || !accessKeySecret) {
-    return { ok: false, error: '请先在「设置 → 模型与接口设置」填写阿里云短信 AccessKey ID / Secret' };
-  }
   const params = {
-    AccessKeyId: accessKeyId,
+    AccessKeyId: SMS_CONFIG.accessKeyId,
     Action: 'SendSms',
     Format: 'JSON',
     PhoneNumbers: phone,
@@ -203,7 +200,7 @@ async function aliyunSendSms(phone, code) {
   const enc = new TextEncoder();
   const cryptoKey = await crypto.subtle.importKey(
     'raw',
-    enc.encode(accessKeySecret + '&'),
+    enc.encode(SMS_CONFIG.accessKeySecret + '&'),
     { name: 'HMAC', hash: 'SHA-1' },
     false,
     ['sign']
@@ -598,6 +595,39 @@ async function generateReply(product, info, target) {
   return c;
 }
 
+// ===== 私信内容生成：给感兴趣的用户发一对一私信，吸引其进一步了解产品 =====
+async function generateDM(product, info, target) {
+  const sys =
+    '你是小红书上一个真实用户，正在给一位看过你视频、留过言的用户发私信。' +
+    '私信要像真人一对一聊天：自然、有针对性，绝对不像群发广告。';
+
+  const user =
+    '产品名称：' + product.name + '\n' +
+    '产品描述：' + product.description + '\n\n' +
+    '视频标题：' + (info.title || '(无)') + '\n\n' +
+    '对方昵称：' + target.name + '\n' +
+    '对方在视频下的评论：' + target.content + '\n\n' +
+    '请写一条私信，要求：\n' +
+    '1. 20~50 字，口语化，像真人在打字；\n' +
+    '2. 结合对方的评论内容说事，让他感觉你确实看过他说的话；\n' +
+    '3. 自然带出产品能帮上忙的点，然后邀请进一步了解；产品描述里明确给出官网域名的，结尾自然带上域名本身（不要带 http:// 或 https://，不要用超链接形式）；没给域名的，就邀请他回复继续聊；\n' +
+    '4. 不要用"亲""您好""打扰了"等客服腔，不要堆感叹号，不要出现"福利""限时""点击"等营销词；\n' +
+    '5. 只输出私信正文，不要引号、解释、换行。';
+
+  const content = await callLLM(
+    [
+      { role: 'system', content: sys },
+      { role: 'user', content: user }
+    ],
+    { temperature: 0.9 }
+  );
+
+  let c = (content || '').trim();
+  c = c.replace(/^["'“”\s]+|["'“”\s]+$/g, '');
+  c = c.replace(/\n+/g, ' ').trim();
+  return c.slice(0, 120);
+}
+
 // ===== content script 通信 =====
 async function sendContent(tabId, msg) {
   try {
@@ -704,6 +734,21 @@ async function recordRepliedComment(noteId, name, content, reply, phone) {
   await storageSet({ repliedComments: list.slice(-500) });
 }
 
+// ===== 私信记录（按用户去重：同一个用户只私信一次）=====
+async function getDmRecords() {
+  return (await storageGet('dmRecords', [])) || [];
+}
+async function isAlreadyDmed(userId) {
+  if (!userId) return false;
+  const list = await getDmRecords();
+  return list.some((r) => r.userId === userId);
+}
+async function recordDmed(userId, name) {
+  const list = await getDmRecords();
+  list.push({ userId, name: name || '', time: Date.now() });
+  await storageSet({ dmRecords: list.slice(-500) });
+}
+
 // ===== 任务主循环 =====
 async function runTask(cfg) {
   const settings = await getSettings();
@@ -725,12 +770,13 @@ async function runTask(cfg) {
   task.progress = {
     product: 0, productTotal: groups.length,
     keyword: 0, keywordTotal: allKeywordCount,
-    note: 0, noteTotal: 0, done: 0, total: 0
+    note: 0, noteTotal: 0, done: 0, total: 0, dms: 0
   };
   broadcastState();
 
   let totalComments = 0;
   let totalReplies = 0;
+  let totalDMs = 0;
   let totalVideos = 0;
   // 上报本次任务，拿到服务端 run_id，后续评论/回复都关联它
   let reportRunId = null;
@@ -865,9 +911,9 @@ async function runTask(cfg) {
             phone: cfg.phone || ''
           });
 
-          // ===== 回复评论区里对产品感兴趣的用户 =====
+          // ===== 回复 / 私信评论区里对产品感兴趣的用户 =====
           // 仅在主评论发布成功后进行；失败不影响主流程；与主评论同一个产品
-          if (settings.enableCommentReply && res && res.ok && !task.stopRequested) {
+          if ((settings.enableCommentReply || settings.enablePrivateMessage) && res && res.ok && !task.stopRequested) {
             await waitWhilePaused();
             try {
               const cRes = await sendContent(tab.id, { type: 'GET_COMMENTS', max: 12 });
@@ -892,11 +938,15 @@ async function runTask(cfg) {
                 } catch (e) {
                   log('warn', `评论兴趣分析失败：${e.message}`);
                 }
-                const picked = interested.slice(0, settings.maxRepliesPerNote);
+                // 回复与私信分别取前 N 个；picked 取两者较大值，供两个环节各自切片
+                const picked = interested.slice(0, Math.max(
+                  settings.enableCommentReply ? settings.maxRepliesPerNote : 0,
+                  settings.enablePrivateMessage ? settings.maxDMsPerNote : 0
+                ));
                 if (!picked.length) {
                   log('info', '未发现对产品感兴趣的用户评论');
                 }
-                for (const p of picked) {
+                for (const p of (settings.enableCommentReply ? picked.slice(0, settings.maxRepliesPerNote) : [])) {
                   if (task.stopRequested) break;
                   await waitWhilePaused();
                   // 注意：LLM 返回的 index 是评论自身的 index 字段（DOM 位置），不是 fresh 数组下标
@@ -938,6 +988,74 @@ async function runTask(cfg) {
                     error: (rr && rr.ok) ? '' : ((rr && rr.error) || '未知原因')
                   });
                 }
+
+                // ===== 给感兴趣的用户发私信（导航到其主页发送） =====
+                if (settings.enablePrivateMessage && !task.stopRequested) {
+                  for (const p of picked.slice(0, settings.maxDMsPerNote)) {
+                    if (task.stopRequested) break;
+                    await waitWhilePaused();
+                    const target = fresh.find((c) => c.index === p.index);
+                    if (!target) continue;
+                    if (!target.userUrl) {
+                      log('warn', `「${target.name}」没有主页链接，无法私信`);
+                      continue;
+                    }
+                    if (target.userId && (await isAlreadyDmed(target.userId))) {
+                      log('info', `已给「${target.name}」发过私信，跳过`);
+                      continue;
+                    }
+                    let dm;
+                    try {
+                      dm = await generateDM(product, info, target);
+                    } catch (e) {
+                      log('error', `私信内容生成失败：${e.message}`);
+                      continue;
+                    }
+                    log('info', `准备给「${target.name}」发私信：${dm}`);
+                    await humanSleep(settings.dmDelayMin, settings.dmDelayMax, '私信前随机间隔');
+                    // 整页导航到用户主页（SPA 内跳转/返回不可靠，之后统一回到搜索页）
+                    await navigateAndWait(tab.id, target.userUrl);
+                    const profileReady = await waitForPageType(tab.id, 'profile', 20000);
+                    if (!profileReady) {
+                      log('warn', `「${target.name}」主页加载超时，跳过私信`);
+                      reportEvent('dm', {
+                        phone: cfg.phone || '',
+                        run_id: reportRunId,
+                        note_id: note.id,
+                        note_url: note.url || '',
+                        note_title: info.title || '',
+                        target_name: target.name,
+                        target_user_id: target.userId || '',
+                        dm_text: dm,
+                        ok: false,
+                        error: '主页加载超时'
+                      });
+                      continue;
+                    }
+                    await humanSleep(2, 4, '浏览对方主页');
+                    const dr = await sendContent(tab.id, { type: 'SEND_DM', text: dm });
+                    if (dr && dr.ok) {
+                      totalDMs++;
+                      task.progress.dms = totalDMs;
+                      log('success', `已给「${target.name}」发送私信`);
+                      await recordDmed(target.userId, target.name);
+                    } else {
+                      log('error', `给「${target.name}」发私信失败：${(dr && dr.error) || '未知原因'}`);
+                    }
+                    reportEvent('dm', {
+                      phone: cfg.phone || '',
+                      run_id: reportRunId,
+                      note_id: note.id,
+                      note_url: note.url || '',
+                      note_title: info.title || '',
+                      target_name: target.name,
+                      target_user_id: target.userId || '',
+                      dm_text: dm,
+                      ok: !!(dr && dr.ok),
+                      error: (dr && dr.ok) ? '' : ((dr && dr.error) || '未知原因')
+                    });
+                  }
+                }
               }
             } catch (e) {
               log('error', `评论回复环节异常：${e.message}`);
@@ -968,7 +1086,9 @@ async function runTask(cfg) {
       }
     }
 
-    log('success', `任务完成：共发布 ${totalComments}/${totalVideos} 条评论`);
+    log('success', `任务完成：共发布 ${totalComments}/${totalVideos} 条评论` +
+      (totalReplies ? `，回复 ${totalReplies} 人` : '') +
+      (totalDMs ? `，私信 ${totalDMs} 人` : ''));
   } catch (e) {
     log('error', `任务异常：${e.message}`);
   } finally {
@@ -978,7 +1098,8 @@ async function runTask(cfg) {
         phone: cfg.phone || '',
         run_id: reportRunId,
         comments_total: totalComments,
-        replies_total: totalReplies
+        replies_total: totalReplies,
+        dms_total: totalDMs
       });
     }
     task.running = false;
@@ -1124,6 +1245,10 @@ async function handleMessage(msg, sender) {
     case 'CLEAR_REPLIED':
       await storageSet({ repliedComments: [] });
       log('info', '已清空回复记录');
+      return { ok: true };
+    case 'CLEAR_DM':
+      await storageSet({ dmRecords: [] });
+      log('info', '已清空私信记录');
       return { ok: true };
     case 'SEND_CODE':
       return await sendAuthCode(msg.phone);

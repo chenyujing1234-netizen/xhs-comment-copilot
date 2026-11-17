@@ -50,6 +50,7 @@
   .trend .bar { width: 14px; border-radius: 3px 3px 0 0; min-height: 2px; }
   .trend .bar.c { background: #ff2442; }
   .trend .bar.r { background: #fb923c; }
+  .trend .bar.d { background: #38bdf8; }
   .trend .lab { font-size: 11px; color: #8a919f; }
   .legend { display: flex; gap: 14px; font-size: 12px; color: #64748b; margin-top: 8px; }
   .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
@@ -68,7 +69,7 @@
 <div class="topbar">
   <div>
     <h1>小红书获客插件 · 运营看板</h1>
-    <div class="sub">评论发布 / 回复触达 / 客户标识（手机号）运行数据</div>
+    <div class="sub">评论发布 / 回复触达 / 私信触达 / 客户标识（手机号）运行数据</div>
   </div>
   <div class="right">
     <div id="refreshInfo">每 30 秒自动刷新</div>
@@ -99,17 +100,18 @@
 
   function renderTrend(trend) {
     var max = 0;
-    trend.forEach(function (d) { max = Math.max(max, d.comments, d.replies); });
+    trend.forEach(function (d) { max = Math.max(max, d.comments, d.replies, d.dms || 0); });
     if (max < 4) max = 4;
     var days = trend.map(function (d) {
-      var hc = Math.round(d.comments / max * 100), hr = Math.round(d.replies / max * 100);
+      var hc = Math.round(d.comments / max * 100), hr = Math.round(d.replies / max * 100), hd = Math.round((d.dms || 0) / max * 100);
       return '<div class="day"><div class="bars">' +
         '<div class="bar c" style="height:' + hc + '%" title="评论 ' + d.comments + '"></div>' +
         '<div class="bar r" style="height:' + hr + '%" title="回复 ' + d.replies + '"></div>' +
+        '<div class="bar d" style="height:' + hd + '%" title="私信 ' + (d.dms || 0) + '"></div>' +
         '</div><div class="lab">' + d.date.slice(5) + '</div></div>';
     }).join('');
     return '<div class="trend">' + days + '</div>' +
-      '<div class="legend"><span><i style="background:#ff2442"></i>评论</span><span><i style="background:#fb923c"></i>回复</span></div>';
+      '<div class="legend"><span><i style="background:#ff2442"></i>评论</span><span><i style="background:#fb923c"></i>回复</span><span><i style="background:#38bdf8"></i>私信</span></div>';
   }
 
   function renderRank(list, total) {
@@ -131,8 +133,10 @@
     html += '<div class="cards">' +
       card('今日评论', s.comment_today, true) +
       card('今日回复', s.reply_today, true) +
+      card('今日私信', s.dm_today, true) +
       card('累计评论', s.comment_total, '成功 ' + s.comment_ok) +
       card('累计回复', s.reply_total, '成功 ' + s.reply_ok) +
+      card('累计私信', s.dm_total, '成功 ' + s.dm_ok) +
       card('客户端（手机号）', s.device_count) +
       card('产品库', s.product_count) +
       card('运行中任务', s.running_runs) +
@@ -149,11 +153,11 @@
 
     // 最近任务
     html += '<div class="panel"><h2>最近任务</h2><table><tr>' +
-      '<th>ID</th><th>手机号</th><th>关键词/产品</th><th>评论</th><th>回复</th><th>状态</th><th>开始时间</th><th>结束时间</th></tr>' +
+      '<th>ID</th><th>手机号</th><th>关键词/产品</th><th>评论</th><th>回复</th><th>私信</th><th>状态</th><th>开始时间</th><th>结束时间</th></tr>' +
       d.runs.map(function (r) {
         return '<tr><td>' + r.id + '</td><td>' + esc(r.phone) + '</td>' +
           '<td>' + r.keyword_total + ' / ' + r.product_total + '</td>' +
-          '<td>' + r.comments_total + '</td><td>' + r.replies_total + '</td>' +
+          '<td>' + r.comments_total + '</td><td>' + r.replies_total + '</td><td>' + (r.dms_total || 0) + '</td>' +
           '<td><span class="tag ' + (r.status === 'running' ? 'run">运行中' : 'done">已结束') + '</span></td>' +
           '<td class="muted">' + esc(r.started_at) + '</td><td class="muted">' + esc(r.ended_at || '-') + '</td></tr>';
       }).join('') + '</table></div>';
@@ -176,6 +180,18 @@
         return '<tr><td class="muted">' + esc(r.time) + '</td><td>' + esc(r.phone) + '</td>' +
           '<td>' + esc(r.name) + '</td>' +
           '<td class="ellipsis" title="' + esc(r.target) + '">' + esc(r.target) + '</td>' +
+          '<td class="ellipsis" title="' + esc(r.text) + '">' + esc(r.text) + '</td>' +
+          '<td class="ellipsis">' + link(r.url, r.title || '链接') + '</td>' +
+          '<td>' + tag(r.ok, r.error) + '</td></tr>';
+      }).join('') + '</table></div>';
+
+    // 最近私信
+    html += '<div class="panel"><h2>最近私信（给感兴趣的用户发了一对一私信）</h2><table><tr>' +
+      '<th>时间</th><th>手机号</th><th>私信对象</th><th>用户ID</th><th>私信内容</th><th>视频</th><th>状态</th></tr>' +
+      (d.dms || []).map(function (r) {
+        return '<tr><td class="muted">' + esc(r.time) + '</td><td>' + esc(r.phone) + '</td>' +
+          '<td>' + esc(r.name) + '</td>' +
+          '<td class="muted ellipsis" title="' + esc(r.user_id) + '">' + esc(r.user_id) + '</td>' +
           '<td class="ellipsis" title="' + esc(r.text) + '">' + esc(r.text) + '</td>' +
           '<td class="ellipsis">' + link(r.url, r.title || '链接') + '</td>' +
           '<td>' + tag(r.ok, r.error) + '</td></tr>';

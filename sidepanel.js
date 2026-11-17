@@ -107,8 +107,9 @@ function renderStatus() {
     const total = p.total || (p.keywordTotal * (p.noteTotal || 1));
     const done = (p.keyword - 1) * (p.noteTotal || 1) + (p.note || 0);
     const productPart = p.productTotal > 1 ? `产品 ${p.product}/${p.productTotal} · ` : '';
+    const dmPart = p.dms ? ` · 已私信 ${p.dms}` : '';
     $('progressText').textContent =
-      productPart + `关键词 ${p.keyword}/${p.keywordTotal} · 视频 ${p.note || 0}/${p.noteTotal || 0} · 已评论 ${p.done || 0}`;
+      productPart + `关键词 ${p.keyword}/${p.keywordTotal} · 视频 ${p.note || 0}/${p.noteTotal || 0} · 已评论 ${p.done || 0}` + dmPart;
     const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
     $('progressBar').style.width = pct + '%';
   } else if (t.running) {
@@ -200,6 +201,10 @@ function fillSettingsForm() {
   $('maxRepliesPerNote').value = s.maxRepliesPerNote != null ? s.maxRepliesPerNote : 1;
   $('replyDelayMin').value = s.replyDelayMin != null ? s.replyDelayMin : 15;
   $('replyDelayMax').value = s.replyDelayMax != null ? s.replyDelayMax : 40;
+  $('enablePrivateMessage').checked = s.enablePrivateMessage !== false;
+  $('maxDMsPerNote').value = s.maxDMsPerNote != null ? s.maxDMsPerNote : 1;
+  $('dmDelayMin').value = s.dmDelayMin != null ? s.dmDelayMin : 20;
+  $('dmDelayMax').value = s.dmDelayMax != null ? s.dmDelayMax : 45;
 
   const modelSel = $('model');
   modelSel.innerHTML = '';
@@ -238,7 +243,11 @@ function collectSettingsForm() {
     enableCommentReply: $('enableCommentReply').checked,
     maxRepliesPerNote: num('maxRepliesPerNote'),
     replyDelayMin: num('replyDelayMin'),
-    replyDelayMax: num('replyDelayMax')
+    replyDelayMax: num('replyDelayMax'),
+    enablePrivateMessage: $('enablePrivateMessage').checked,
+    maxDMsPerNote: num('maxDMsPerNote'),
+    dmDelayMin: num('dmDelayMin'),
+    dmDelayMax: num('dmDelayMax')
   };
 }
 
@@ -488,6 +497,15 @@ function bindEvents() {
   $('btnClearReplied').addEventListener('click', async () => {
     const r = await send({ type: 'CLEAR_REPLIED' });
     flash(r.ok ? '已清空回复记录' : '操作失败', r.ok);
+  });
+  $('btnSaveDm').addEventListener('click', async () => {
+    const r = await send({ type: 'SAVE_SETTINGS', settings: collectSettingsForm() });
+    state.settings = collectSettingsForm();
+    flash(r.ok ? '私信设置已保存' : ('保存失败：' + r.error), r.ok);
+  });
+  $('btnClearDm').addEventListener('click', async () => {
+    const r = await send({ type: 'CLEAR_DM' });
+    flash(r.ok ? '已清空私信记录' : '操作失败', r.ok);
   });
 }
 
