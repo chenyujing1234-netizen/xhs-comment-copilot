@@ -1176,13 +1176,25 @@ async function handleMessage(msg, sender) {
       const safe = async (fn, def) => {
         try { return await fn(); } catch (e) { return def; }
       };
+      const curAuth = await safe(getAuth, null);
+      // 登录态诊断：面板重开后仍要求登录时，用来区分「后台连不上」与「存储里没有」
+      const authDiag = { local: '', sync: '' };
+      try {
+        const l = await chrome.storage.local.get('auth');
+        if (l.auth && l.auth.phone) authDiag.local = l.auth.phone;
+        const s = await chrome.storage.sync.get('auth');
+        if (s.auth && s.auth.phone) authDiag.sync = s.auth.phone;
+      } catch (e) { authDiag.error = e && e.message; }
+      log('info', '面板打开：登录态 ' + (curAuth ? '已登录 ' + curAuth.phone : '未登录') +
+        '（本地=' + (authDiag.local || '无') + '，同步=' + (authDiag.sync || '无') + '）');
       return {
         ok: true,
         settings: await safe(getSettings, {}),
         products: await safe(getProducts, []),
         keywords: await safe(getKeywords, []),
         commentedNotes: await safe(getCommentedNotes, []),
-        auth: await safe(getAuth, null),
+        auth: curAuth,
+        authDiag,
         task: { ...task, progress: { ...task.progress } },
         logs: logs.slice(-200),
         modelOptions: MODEL_OPTIONS
