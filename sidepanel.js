@@ -376,7 +376,12 @@ function updateKeywordOwnerHint() {
 
 // ===== 初始化 =====
 async function init() {
-  const resp = await send({ type: 'GET_STATE' });
+  let resp = await send({ type: 'GET_STATE' });
+  // SW 冷启动/休眠时首次通信可能失败：重试一次，避免面板因拿不到登录态而卡在登录页
+  if (!resp || !resp.ok) {
+    await new Promise((r) => setTimeout(r, 600));
+    resp = await send({ type: 'GET_STATE' });
+  }
   if (resp && resp.ok) {
     state.settings = resp.settings || {};
     state.products = resp.products || [];
@@ -392,6 +397,8 @@ async function init() {
     renderStatus();
   } else {
     renderLogs([{ timeStr: '--:--:--', level: 'error', message: '无法连接后台：' + (resp && resp.error) }]);
+    // 未登录时日志区被隐藏，把连接错误同时显示在登录页上，避免用户只看到登录页却不知原因
+    setLoginMsg('无法连接插件后台：' + ((resp && resp.error) || '请关闭面板重开，或到 chrome://extensions 刷新插件'), false);
   }
 }
 

@@ -155,8 +155,28 @@ const CODE_TTL_MS = 60 * 1000;        // 验证码有效期
 const RESEND_COOLDOWN_MS = 60 * 1000; // 单号重发冷却
 const PHONE_RE = /^1[3-9]\d{9}$/;
 
+// 登录态持久化：local 为主、sync 兜底（local 偶发写入失败/被清理时仍能保持登录）
 async function getAuth() {
-  return (await storageGet('auth', null)) || null;
+  let a = (await storageGet('auth', null)) || null;
+  if (a && a.phone) return a;
+  try {
+    const o = await chrome.storage.sync.get('auth');
+    if (o.auth && o.auth.phone) return o.auth;
+  } catch (e) { /* ignore */ }
+  return null;
+}
+
+async function saveAuth(auth) {
+  // 双写：local 失败不影响 sync，任一处成功登录态即可保留
+  let localOk = true;
+  try { await chrome.storage.local.set({ auth }); } catch (e) { localOk = false; }
+  try { await chrome.storage.sync.set({ auth }); } catch (e) { /* ignore */ }
+  if (!localOk) log('warn', '登录态写入本地存储失败，已用同步存储兜底');
+}
+
+async function clearAuth() {
+  try { await chrome.storage.local.set({ auth: null }); } catch (e) { /* ignore */ }
+  try { await chrome.storage.sync.set({ auth: null }); } catch (e) { /* ignore */ }
 }
 
 // Python urllib.parse.quote(safe='~') 的等价实现：只保留未保留字符 A-Za-z0-9 与 _.-~
@@ -262,7 +282,7 @@ async function loginWithCode(phone, code) {
     phone,
     loggedInAt: new Date().toLocaleString('zh-CN', { hour12: false })
   };
-  await storageSet({ auth });
+  await saveAuth(auth);
   log('success', `手机号 ${phone} 登录成功，本客户端将以该手机号标识`);
   // 上报登录事件（服务端看板按手机号标识客户端）
   reportEvent('login', { phone, client: 'chrome-extension' });
@@ -1152,13 +1172,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 async function handleMessage(msg, sender) {
   switch (msg.type) {
     case 'GET_STATE':
+      // 逐项容错：任一项读取异常都不能拖垮整个状态（否则登录态丢失、面板卡在登录页）
+      const safe = async (fn, def) => {
+        try { return await fn(); } catch (e) { return def; }
+      };
       return {
         ok: true,
-        settings: await getSettings(),
-        products: await getProducts(),
-        keywords: await getKeywords(),
-        commentedNotes: await getCommentedNotes(),
-        auth: await getAuth(),
+        settings: await safe(getSettings, {}),
+        products: await safe(getProducts, []),
+        keywords: await safe(getKeywords, []),
+        commentedNotes: await safe(getCommentedNotes, []),
+        auth: await safe(getAuth, null),
         task: { ...task, progress: { ...task.progress } },
         logs: logs.slice(-200),
         modelOptions: MODEL_OPTIONS
@@ -1259,7 +1283,7 @@ async function handleMessage(msg, sender) {
     case 'LOGIN':
       return await loginWithCode(msg.phone, msg.code);
     case 'LOGOUT':
-      await storageSet({ auth: null });
+      await clearAuth();
       log('info', '已退出登录');
       return { ok: true };
     default:
