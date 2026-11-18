@@ -72,6 +72,22 @@ const DEFAULT_PRODUCTS = [
       '推广目标：让对AI落地感兴趣的人访问官网 https://www.shiflowmind.cloud 了解服务并预约免费上门培训；' +
       '写评论和回复时可以自然地提到官网域名 shiflowmind.cloud 引导别人去看（不要带 http:// 或 https:// 前缀，不要贴成超链接）。',
     selected: true
+  },
+  {
+    id: 'p_hermes',
+    name: 'Hermes Agent 企业私有化部署服务',
+    description:
+      'Hermes Agent 是 Nous Research 开源的自进化 AI 智能体（MIT 协议，GitHub 仓库 NousResearch/hermes-agent）。' +
+      '核心能力：1）闭环学习——干完复杂任务自动沉淀成技能，技能在使用中持续自我改进，跨会话记忆、过往对话可搜索，越用越懂你；' +
+      '2）多平台消息网关——一个进程同时接入 Telegram、Discord、Slack、WhatsApp、Signal、飞书和终端，在哪聊都在线；' +
+      '3）300+ 大模型无锁定切换（Nous Portal、OpenRouter、GLM、Kimi、MiniMax、Ollama 等），一条命令换模型，不绑死任何一家；' +
+      '4）定时自动化——自然语言描述任务，无人值守定时跑，日报、备份、巡检自动投递；' +
+      '5）子代理并行委派、MCP 协议扩展、40+ 内置工具（网页搜索、图像生成、TTS、云浏览器、飞书文档、GitHub 等）；' +
+      '6）六种运行后端（本地、Docker、SSH、Daytona、Modal），$5 的 VPS 就能跑，也能扩展到 GPU 集群。' +
+      '我们基于深度定制版提供私有化部署服务：Docker 镜像一键/批量部署、Dashboard 可视化管理、企业认证与权限管控、内网离线环境交付、Ansible 多机批量部署、容器出站白名单与技能只读保护，支持 x86 + Ubuntu/CentOS。' +
+      '目标客户：想把 AI 智能体落地到业务里但缺部署能力的企业和团队；因数据安全要求必须内网/私有化部署的单位；想体验自进化 Agent 的开发者和极客。' +
+      '推广目标：让对私有化 AI 智能体感兴趣的人主动私信联系，进一步沟通需求；评论/回复/私信中不贴任何链接、不提任何域名、不说价格，靠分享真实落地经验吸引对方私聊。',
+    selected: true
   }
 ];
 
