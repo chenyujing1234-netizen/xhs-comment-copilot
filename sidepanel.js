@@ -339,6 +339,7 @@ function fillSettingsForm() {
   $('keywordIntervalMin').value = s.keywordIntervalMin != null ? s.keywordIntervalMin : 20;
   $('keywordIntervalMax').value = s.keywordIntervalMax != null ? s.keywordIntervalMax : 40;
   $('maxVideos').value = s.maxVideosPerKeyword != null ? s.maxVideosPerKeyword : 5;
+  $('minLikes').value = s.minLikes != null ? s.minLikes : 50;
   $('commentIntervalMin').value = s.commentIntervalMin != null ? s.commentIntervalMin : 45;
   $('commentIntervalMax').value = s.commentIntervalMax != null ? s.commentIntervalMax : 100;
   $('skipCommented').checked = s.skipCommented !== false;
@@ -382,6 +383,7 @@ function collectSettingsForm() {
     keywordIntervalMin: num('keywordIntervalMin'),
     keywordIntervalMax: num('keywordIntervalMax'),
     maxVideosPerKeyword: num('maxVideos'),
+    minLikes: num('minLikes'),
     commentIntervalMin: num('commentIntervalMin'),
     commentIntervalMax: num('commentIntervalMax'),
     skipCommented: $('skipCommented').checked,

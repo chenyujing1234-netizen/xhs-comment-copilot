@@ -31,6 +31,32 @@
     return m ? m[1] : '';
   }
 
+  // 解析计数文本："1.2万"→12000、"3456"→3456、"赞 123"→123；解析失败返回 null
+  function parseCount(text) {
+    const t = (text || '').replace(/[\s,]/g, '');
+    const m = t.match(/(\d+(?:\.\d+)?)(万|w|W)?/);
+    if (!m) return null;
+    const n = parseFloat(m[1]);
+    if (isNaN(n)) return null;
+    return m[2] ? Math.round(n * 10000) : Math.round(n);
+  }
+
+  // 读取点赞数：多候选选择器依次尝试，取第一个能解析出数字的；取不到返回 null
+  function readLikes(root) {
+    const cands = [
+      q('.like-wrapper .count', root),
+      q('[class*="like-wrapper"] [class*="count"]', root),
+      q('[class*="like"] [class*="count"]', root),
+      q('.count', root)
+    ];
+    for (const el of cands) {
+      if (!el) continue;
+      const n = parseCount(el.innerText || el.textContent);
+      if (n != null) return n;
+    }
+    return null;
+  }
+
   // ===== 搜索结果采集 =====
   // 关键：同一笔记在 DOM 里存在多个 <a>，只有带 xsec_token 的链接（cover/title）能正常打开，
   // 不带 token 的 /explore/xxx 空链接会触发 300031「当前笔记暂时无法浏览」。这里优先保留带 token 的链接。
@@ -48,9 +74,10 @@
         title = (section.innerText || '').trim().slice(0, 80);
       }
       const url = a.href || ('https://www.xiaohongshu.com' + href);
+      const likes = readLikes(section);
       const existing = byId.get(id);
       if (!existing) {
-        byId.set(id, { id, url, title, hasToken });
+        byId.set(id, { id, url, title, hasToken, likes });
       } else {
         // 已有不带 token 的链接，遇到带 token 的则替换
         if (hasToken && !existing.hasToken) {
@@ -58,9 +85,10 @@
           existing.hasToken = true;
         }
         if (!existing.title && title) existing.title = title;
+        if (existing.likes == null && likes != null) existing.likes = likes;
       }
     });
-    return Array.from(byId.values()).map(({ id, url, title }) => ({ id, url, title }));
+    return Array.from(byId.values()).map(({ id, url, title, likes }) => ({ id, url, title, likes }));
   }
 
   async function scrollToLoad(scrollTimes) {
@@ -96,6 +124,7 @@
       title,
       desc,
       author,
+      likes: readLikes(document),
       url: location.href,
       id: extractNoteId(location.href)
     };
@@ -489,7 +518,13 @@
             return { ok: true, pageType: pageType(), url: location.href };
           case 'COLLECT_SEARCH_RESULTS': {
             const count = await scrollToLoad(msg.scrollTimes || 5);
-            const notes = noteLinks().slice(0, msg.max || 5);
+            const max = msg.max || 5;
+            const minLikes = msg.minLikes || 0;
+            // 点赞数下限过滤：卡片上取到点赞数且不达标的直接剔除；
+            // 取不到点赞数的先保留，由后台打开详情页后兜底校验
+            const notes = noteLinks()
+              .filter((n) => minLikes <= 0 || n.likes == null || n.likes >= minLikes)
+              .slice(0, max);
             return { ok: true, count, notes };
           }
           case 'OPEN_NOTE': {

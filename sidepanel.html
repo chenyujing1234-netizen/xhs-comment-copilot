@@ -131,6 +131,10 @@
             <input id="maxVideos" type="number" min="1" max="20" value="5" />
           </div>
           <div class="field">
+            <label>点赞数下限</label>
+            <input id="minLikes" type="number" min="0" max="1000000" value="50" />
+          </div>
+          <div class="field">
             <label>评论间隔(秒) 最小</label>
             <input id="commentIntervalMin" type="number" min="10" value="45" />
           </div>
@@ -139,6 +143,7 @@
             <input id="commentIntervalMax" type="number" min="20" value="100" />
           </div>
         </div>
+        <p class="test-result">只评论点赞数达到「点赞数下限」的视频/文章，点赞太少的自动跳过；填 0 表示不限制。</p>
       </div>
     </section>
 

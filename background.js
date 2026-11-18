@@ -18,6 +18,7 @@ const DEFAULT_SETTINGS = {
   keywordIntervalMin: 20,
   keywordIntervalMax: 40,
   maxVideosPerKeyword: 8,
+  minLikes: 50, // 只评论点赞数达到该值的视频/文章；0 表示不限制
   maxKeywordsPerTask: 12,
   scrollTimes: 2,
   skipCommented: true,
@@ -223,8 +224,8 @@ async function reconcileInterruptedTasks() {
 // ===== 手机号 + 验证码登录（参考 ContextBuddy auth_service.py）=====
 // 阿里云短信 Dysmsapi 2017-05-25 SendSms（RPC 签名 V1，HMAC-SHA1）
 const SMS_CONFIG = {
-  accessKeyId: 'YOUR_ALIYUN_ACCESS_KEY_ID',
-  accessKeySecret: 'YOUR_ALIYUN_ACCESS_KEY_SECRET',
+  accessKeyId: 'YOUR_ACCESS_KEY_ID',
+  accessKeySecret: 'YOUR_ACCESS_KEY_SECRET',
   signName: '哈希流光',
   templateCode: 'SMS_495955218'
 };
@@ -1017,6 +1018,7 @@ async function runTask(cfg) {
         const r = await sendContent(tab.id, {
           type: 'COLLECT_SEARCH_RESULTS',
           max: settings.maxVideosPerKeyword,
+          minLikes: settings.minLikes || 0,
           scrollTimes: settings.scrollTimes
         });
         const notes = (r && r.notes) || [];
@@ -1040,6 +1042,12 @@ async function runTask(cfg) {
           // 续跑跳过：本关键词在中断前已处理过的笔记
           if (doneIds.indexOf(note.id) >= 0) {
             log('info', `[视频 ${ni + 1}/${notes.length}] 续跑跳过已处理：${note.title || note.id}`);
+            continue;
+          }
+          // 点赞数过滤：卡片上取到点赞数且低于下限的不选这篇
+          // （不写入 doneIds：续跑时允许重新审视，万一是点赞数涨上来了）
+          if ((settings.minLikes || 0) > 0 && note.likes != null && note.likes < settings.minLikes) {
+            log('info', `[视频 ${ni + 1}/${notes.length}] 点赞数 ${note.likes} 不足 ${settings.minLikes}，跳过：${note.title || note.id}`);
             continue;
           }
           doneIds.push(note.id);
@@ -1069,6 +1077,12 @@ async function runTask(cfg) {
             continue;
           }
           log('info', `视频标题：${info.title || '(空)'} | 作者：${info.author || '(未知)'}`);
+
+          // 兜底校验：卡片上没取到点赞数的，用详情页点赞数复核，低于下限则跳过不评论
+          if ((settings.minLikes || 0) > 0 && note.likes == null && info.likes != null && info.likes < settings.minLikes) {
+            log('info', `[视频 ${ni + 1}/${notes.length}] 详情页点赞数 ${info.likes} 不足 ${settings.minLikes}，跳过：${info.title || note.id}`);
+            continue;
+          }
 
           let comment;
           try {
