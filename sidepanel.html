@@ -111,10 +111,8 @@
     <section id="tab-task" class="panel">
       <div class="card">
         <div class="card-head"><span>关键词设置</span></div>
-        <div class="field">
-          <label>搜索关键词（每行一个）</label>
-          <textarea id="keywordsInput" rows="6" placeholder="例如：产后恢复、宝宝湿疹怎么办、新手妈妈好物……"></textarea>
-        </div>
+        <p class="test-result">关键词按产品分组管理，每行一个；任务执行时一个产品跑完再跑下一个。每个产品可单独「AI 生成」。</p>
+        <div id="kwGroups" class="kw-groups"></div>
         <p id="kwhint" class="test-result"></p>
         <div class="row">
           <button id="btnGenKeywords" class="btn btn-primary">AI 生成关键词（基于所选产品）</button>

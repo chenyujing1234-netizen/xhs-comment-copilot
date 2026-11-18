@@ -197,6 +197,20 @@ body.not-logged #btnStop { display: none; }
 .toast.ok { background: rgba(22, 101, 52, 0.92); }
 .toast.err { background: rgba(185, 28, 28, 0.92); }
 
+/* ===== 关键词分组（按产品，对应关系在界面上直接可见）===== */
+.kw-groups { display: flex; flex-direction: column; gap: 10px; margin: 8px 0; }
+.kw-group { border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; }
+.kw-group[data-orphan] { opacity: 0.75; background: #fafafa; }
+.kw-group-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.kw-group-name { font-weight: 600; }
+.kw-count { font-size: 12px; color: var(--muted); }
+.kw-group-head button { margin-left: auto; }
+.kw-group textarea { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font-size: 13px; font-family: inherit; resize: vertical; }
+
+/* 产品列表内的关键词计数（与关键词分组呼应） */
+.product-item .p-kwcount { font-size: 12px; color: var(--muted); }
+.product-item .p-kwcount.zero { color: var(--warn); }
+
 /* ===== 任务列表 ===== */
 .task-list { display: flex; flex-direction: column; gap: 10px; }
 .task-item {
