@@ -24,8 +24,9 @@
 
   <nav class="tabs">
     <button class="tab active" data-tab="run">运行</button>
+    <button class="tab" data-tab="tasklist">任务列表</button>
     <button class="tab" data-tab="products">产品</button>
-    <button class="tab" data-tab="task">任务</button>
+    <button class="tab" data-tab="task">关键词</button>
     <button class="tab" data-tab="settings">设置</button>
   </nav>
 
@@ -74,6 +75,21 @@
           <button id="btnExportLogs" class="btn btn-small">导出</button>
         </div>
         <div id="logs" class="logs"></div>
+      </div>
+    </section>
+
+    <!-- 任务列表 -->
+    <section id="tab-tasklist" class="panel">
+      <div class="card">
+        <div class="card-head">
+          <span>任务列表</span>
+          <span>
+            <button id="btnRefreshTasks" class="btn btn-small">刷新</button>
+            <button id="btnClearTasks" class="btn btn-small btn-danger">清空已结束</button>
+          </span>
+        </div>
+        <p class="test-result">任务中断（暂停 / 停止 / 电脑关机）后会保留在这里，可「继续执行」从中断处接着跑；已完成的任务也会留存，可「重新执行」。</p>
+        <div id="taskList" class="task-list"></div>
       </div>
     </section>
 

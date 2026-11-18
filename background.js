@@ -79,7 +79,8 @@ const task = {
   running: false,
   paused: false,
   stopRequested: false,
-  progress: { keyword: 0, keywordTotal: 0, note: 0, noteTotal: 0, done: 0, total: 0, dms: 0 }
+  progress: { keyword: 0, keywordTotal: 0, note: 0, noteTotal: 0, done: 0, total: 0, dms: 0 },
+  recordId: null // 对应「任务列表」中的记录 id（运行中才有值）
 };
 
 let logs = [];           // 内存日志
@@ -89,6 +90,13 @@ let panelPorts = new Set(); // 已连接的面板端口
 try {
   chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
 } catch (e) { /* 旧版本忽略 */ }
+
+// 当前任务在「任务列表」中的记录：运行中随进度实时更新，暂停/停止/完成时写终态
+let currentRecord = null;
+
+// SW 启动兜底：把存储里残留的 running/paused 记录标记为 interrupted
+// （SW 重启时内存必无运行任务，这些记录只可能是被电脑关机/SW 回收打断的）
+reconcileInterruptedTasks().catch(() => { /* 忽略 */ });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rnd = (min, max) => min + Math.random() * (max - min);
@@ -141,6 +149,75 @@ async function getKeywords() {
 }
 async function saveKeywords(k) {
   await storageSet({ keywords: k || [] });
+}
+
+// ===== 任务历史记录（任务列表 + 断点续跑）=====
+// 记录结构：{id, status, startedAt, endedAt, reportRunId,
+//   params:{products, keywords, phone}（参数快照，不含 apiKey；续跑时读当前设置）,
+//   cursor:{gi, ki, doneNoteIds}（产品组/关键词索引 + 本关键词已处理笔记 id）,
+//   progress 快照, stats:{comments, replies, dms, videos}}
+// status：running 运行中 / paused 已暂停 / stopped 已停止 / completed 已完成 / interrupted 已中断
+const TASK_HISTORY_MAX = 100;
+
+async function getTaskHistory() {
+  return (await storageGet('taskHistory', [])) || [];
+}
+async function saveTaskHistory(list) {
+  await storageSet({ taskHistory: (list || []).slice(0, TASK_HISTORY_MAX) });
+}
+
+// 列表用摘要：不带产品长描述，避免广播 payload 膨胀
+function taskSummary(r) {
+  const params = r.params || {};
+  return {
+    id: r.id,
+    status: r.status,
+    startedAt: r.startedAt,
+    endedAt: r.endedAt,
+    productNames: (params.products || []).map((p) => p.name || '未命名产品'),
+    keywordCount: (params.keywords || []).length,
+    phone: params.phone || '',
+    progress: r.progress || null,
+    stats: r.stats || null
+  };
+}
+async function getTaskSummaries() {
+  return (await getTaskHistory()).map(taskSummary);
+}
+
+// 串行化任务记录写入，避免并发读-改-写丢失更新
+let taskPersistChain = Promise.resolve();
+// 写入/更新一条记录（不存在则置顶），并向面板广播摘要列表
+async function persistTaskRecord(rec) {
+  if (!rec) return;
+  const run = taskPersistChain.then(async () => {
+    const list = await getTaskHistory();
+    const copy = JSON.parse(JSON.stringify(rec));
+    const i = list.findIndex((r) => r.id === rec.id);
+    if (i >= 0) list[i] = copy; else list.unshift(copy);
+    await saveTaskHistory(list);
+    broadcast({ type: 'tasks', tasks: list.map(taskSummary) });
+  });
+  taskPersistChain = run.catch(() => { /* 忽略 */ });
+  return run;
+}
+
+// SW 启动/面板拉取时调用：残留的 running/paused 说明任务已被关机/SW 回收打断
+// （正在本 SW 实例运行的记录要跳过，不能误判）
+async function reconcileInterruptedTasks() {
+  const list = await getTaskHistory();
+  let changed = false;
+  const now = Date.now();
+  for (const r of list) {
+    if (task.running && currentRecord && r.id === currentRecord.id) continue;
+    if (r.status === 'running' || r.status === 'paused') {
+      r.status = 'interrupted';
+      r.endedAt = r.endedAt || now;
+      changed = true;
+    }
+  }
+  if (changed) await saveTaskHistory(list);
+  return list;
 }
 
 // ===== 手机号 + 验证码登录（参考 ContextBuddy auth_service.py）=====
@@ -355,6 +432,8 @@ function stateSnapshot() {
   };
 }
 function broadcastState() {
+  // 同步进任务记录（仅内存）：暂停/落库时拿到的都是最新进度
+  if (currentRecord) currentRecord.progress = { ...task.progress };
   broadcast({ type: 'state', state: { ...task, progress: { ...task.progress } } });
 }
 
@@ -770,15 +849,23 @@ async function recordDmed(userId, name) {
 }
 
 // ===== 任务主循环 =====
+// cfg 两种形态：
+//   新建：{products, keywords, phone}
+//   续跑：{record, resume:{cursor, progress, stats, reportRunId}, phone}（record 为任务列表里的旧记录）
 async function runTask(cfg) {
   const settings = await getSettings();
   task.running = true;
   task.paused = false;
   task.stopRequested = false;
+  task.recordId = null;
+  let taskError = null;
 
+  const isResume = !!cfg.record;
   // 按产品分组：一个产品一个产品地跑，关键词/评论/回复都属于同一个产品，不会张冠李戴
-  const products = cfg.products || [];
-  const groups = buildProductGroups(products, cfg.keywords || [], settings.maxKeywordsPerTask);
+  // 续跑用记录里的参数快照重建分组，产品顺序与关键词归属不受用户后续改动影响
+  const products = isResume ? (cfg.record.params.products || []) : (cfg.products || []);
+  const keywords = isResume ? normalizeKeywords(cfg.record.params.keywords) : normalizeKeywords(cfg.keywords || []);
+  const groups = buildProductGroups(products, keywords, settings.maxKeywordsPerTask);
   if (!groups.length) {
     log('error', '任务未启动：所选产品没有任何归属关键词，请先在「关键词」页生成');
     task.running = false;
@@ -787,36 +874,118 @@ async function runTask(cfg) {
     return;
   }
   const allKeywordCount = groups.reduce((n, g) => n + g.keywords.length, 0);
+
+  // 续跑断点：从哪个产品组/关键词继续，本关键词中断前已处理过哪些笔记
+  const resume = cfg.resume || null;
+  const startGi = resume && resume.cursor ? (resume.cursor.gi || 0) : 0;
+  const startKi = resume && resume.cursor ? (resume.cursor.ki || 0) : 0;
+  const resumeDoneIds = resume && resume.cursor && resume.cursor.doneNoteIds ? resume.cursor.doneNoteIds : [];
+
+  // 任务列表记录：续跑复用旧记录（状态改回 running），否则新建一条
+  if (isResume) {
+    currentRecord = cfg.record;
+    currentRecord.status = 'running';
+    currentRecord.endedAt = null;
+  } else {
+    currentRecord = {
+      id: 't_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
+      status: 'running',
+      startedAt: Date.now(),
+      endedAt: null,
+      params: {
+        products: products.map((p) => ({ id: p.id, name: p.name || '', description: p.description || '', selected: !!p.selected })),
+        keywords: keywords.map((k) => ({ text: k.text, productId: k.productId || '', productName: k.productName || '' })),
+        phone: cfg.phone || ''
+      },
+      cursor: { gi: 0, ki: 0, doneNoteIds: [] },
+      progress: null,
+      stats: { comments: 0, replies: 0, dms: 0, videos: 0 },
+      reportRunId: null
+    };
+  }
+  task.recordId = currentRecord.id;
+
+  // 断点失效保护：产品/关键词被删、每产品关键词上限调小导致组数不足时不能硬跑
+  if (isResume && (startGi >= groups.length || startKi >= (groups[startGi].keywords || []).length)) {
+    log('error', '无法继续：产品/关键词已被删除或修改，原断点失效，请使用「重新执行」');
+    currentRecord.status = 'stopped';
+    currentRecord.endedAt = Date.now();
+    await persistTaskRecord(currentRecord);
+    currentRecord = null;
+    task.running = false;
+    task.paused = false;
+    task.recordId = null;
+    broadcastState();
+    return;
+  }
+
+  // 进度初始化；续跑恢复累计值，让进度条接着中断处显示
   task.progress = {
     product: 0, productTotal: groups.length,
     keyword: 0, keywordTotal: allKeywordCount,
     note: 0, noteTotal: 0, done: 0, total: 0, dms: 0
   };
-  broadcastState();
-
   let totalComments = 0;
   let totalReplies = 0;
   let totalDMs = 0;
   let totalVideos = 0;
-  // 上报本次任务，拿到服务端 run_id，后续评论/回复都关联它
-  let reportRunId = null;
-  try {
-    const rs = await reportEvent('task-start', {
-      phone: cfg.phone || '',
-      keywords: groups.reduce((arr, g) => arr.concat(g.keywords.map((k) => k.text)), []),
-      products: products.map((p) => p.name || '')
-    });
-    if (rs && rs.ok && rs.run_id) reportRunId = rs.run_id;
-  } catch (e) { /* 上报失败不影响任务 */ }
+  if (resume) {
+    const p = resume.progress || {};
+    task.progress.product = p.product || 0;
+    task.progress.keyword = p.keyword || 0;
+    task.progress.done = p.done || 0;
+    task.progress.dms = p.dms || 0;
+    const s = resume.stats || {};
+    totalComments = s.comments || 0;
+    totalReplies = s.replies || 0;
+    totalDMs = s.dms || 0;
+    totalVideos = s.videos || 0;
+  }
+
+  // 把游标/进度/统计同步进任务记录：checkpoint 落库、暂停时立即保存都靠它
+  const setCursor = (gi, ki, doneIds) => {
+    if (currentRecord) currentRecord.cursor = { gi, ki, doneNoteIds: doneIds.slice(-50) };
+  };
+  const syncStats = () => {
+    if (currentRecord) {
+      currentRecord.stats = { comments: totalComments, replies: totalReplies, dms: totalDMs, videos: totalVideos };
+    }
+  };
+  const checkpoint = () => {
+    if (!currentRecord) return;
+    currentRecord.progress = { ...task.progress };
+    syncStats();
+    persistTaskRecord(currentRecord);
+  };
+
+  // 上报本次任务，拿到服务端 run_id，后续评论/回复都关联它；续跑沿用旧 run_id，不重复上报
+  let reportRunId = (resume && resume.reportRunId) || null;
+  if (!reportRunId) {
+    try {
+      const rs = await reportEvent('task-start', {
+        phone: cfg.phone || '',
+        keywords: groups.reduce((arr, g) => arr.concat(g.keywords.map((k) => k.text)), []),
+        products: products.map((p) => p.name || '')
+      });
+      if (rs && rs.ok && rs.run_id) reportRunId = rs.run_id;
+    } catch (e) { /* 上报失败不影响任务 */ }
+    if (reportRunId && currentRecord) currentRecord.reportRunId = reportRunId;
+  }
+
+  await persistTaskRecord(currentRecord);
+  broadcastState();
 
   log('info', `任务开始：${groups.length} 个产品、共 ${allKeywordCount} 个关键词，账号：${cfg.phone || '未登录'}`);
   log('info', '执行顺序：' + groups.map((g) => `${g.product.name}（${g.keywords.length} 词）`).join(' → '));
+  if (isResume) {
+    log('info', `任务继续：从第 ${startGi + 1} 个产品、第 ${startKi + 1} 个关键词处恢复（累计已评论 ${totalComments} 条）`);
+  }
 
   try {
     const tab = await ensureTab();
 
-    // 外层按产品：一个产品跑完（它的全部关键词）再跑下一个产品
-    for (let gi = 0; gi < groups.length; gi++) {
+    // 外层按产品：一个产品跑完（它的全部关键词）再跑下一个产品；续跑从断点产品起步
+    for (let gi = startGi; gi < groups.length; gi++) {
       if (task.stopRequested) break;
       const group = groups[gi];
       const product = group.product; // 本组所有评论/回复都用这个产品
@@ -824,11 +993,16 @@ async function runTask(cfg) {
       broadcastState();
       log('info', `[产品 ${gi + 1}/${groups.length}] ${product.name}：${group.keywords.length} 个关键词，评论与回复均按该产品生成`);
 
-      for (let ki = 0; ki < group.keywords.length; ki++) {
+      for (let ki = (gi === startGi ? startKi : 0); ki < group.keywords.length; ki++) {
         if (task.stopRequested) break;
         await waitWhilePaused();
         const kw = group.keywords[ki].text;
-        task.progress.keyword++;
+        // 续跑起点所在的关键词在中断前已计数，不重复累加
+        if (!(gi === startGi && ki === startKi)) task.progress.keyword++;
+        // 本关键词已处理过的笔记 id（续跑时按 id 跳过，抗搜索结果重排）
+        const doneIds = (gi === startGi && ki === startKi) ? resumeDoneIds.slice() : [];
+        setCursor(gi, ki, doneIds);
+        checkpoint();
         broadcastState();
 
         log('info', `[产品 ${gi + 1}/${groups.length} · 关键词 ${ki + 1}/${group.keywords.length}] 搜索：${kw}`);
@@ -863,6 +1037,13 @@ async function runTask(cfg) {
             log('info', `[视频 ${ni + 1}/${notes.length}] 已评论过，跳过：${note.title || note.id}`);
             continue;
           }
+          // 续跑跳过：本关键词在中断前已处理过的笔记
+          if (doneIds.indexOf(note.id) >= 0) {
+            log('info', `[视频 ${ni + 1}/${notes.length}] 续跑跳过已处理：${note.title || note.id}`);
+            continue;
+          }
+          doneIds.push(note.id);
+          setCursor(gi, ki, doneIds);
 
           log('info', `[视频 ${ni + 1}/${notes.length}] 打开：${note.title || note.id}`);
           // 点击笔记卡片（SPA 跳转），避免冷跳转触发反爬 300031
@@ -902,6 +1083,7 @@ async function runTask(cfg) {
           if (res && res.ok) {
             totalComments++;
             task.progress.done = totalComments;
+            syncStats();
             log('success', `评论已发布`);
           } else {
             log('error', `评论发布失败：${(res && res.error) || '未知原因'}`);
@@ -989,6 +1171,7 @@ async function runTask(cfg) {
                   const rr = await sendContent(tab.id, { type: 'REPLY_COMMENT', index: target.index, text: reply });
                   if (rr && rr.ok) {
                     totalReplies++;
+                    syncStats();
                     log('success', `已回复「${target.name}」`);
                     await recordRepliedComment(note.id, target.name, target.content, reply, cfg.phone);
                   } else {
@@ -1061,6 +1244,7 @@ async function runTask(cfg) {
                     if (dr && dr.ok) {
                       totalDMs++;
                       task.progress.dms = totalDMs;
+                      syncStats();
                       log('success', `已给「${target.name}」发送私信`);
                       await recordDmed(target.userId, target.name);
                     } else {
@@ -1086,6 +1270,7 @@ async function runTask(cfg) {
             }
           }
 
+          checkpoint(); // 笔记收尾：落库当前断点/进度/统计
           if (ni < notes.length - 1 && !task.stopRequested) {
             // 返回搜索结果页，继续下一个笔记。
             // 不要用 history.back()：小红书 SPA 的返回不可靠（页面常卡在加载态或实际未返回，
@@ -1107,6 +1292,7 @@ async function runTask(cfg) {
             ki < group.keywords.length - 1 ? '切换关键词前休息' : '切换产品前休息'
           );
         }
+        checkpoint(); // 关键词收尾：落库当前断点/进度/统计
       }
     }
 
@@ -1114,6 +1300,7 @@ async function runTask(cfg) {
       (totalReplies ? `，回复 ${totalReplies} 人` : '') +
       (totalDMs ? `，私信 ${totalDMs} 人` : ''));
   } catch (e) {
+    taskError = e;
     log('error', `任务异常：${e.message}`);
   } finally {
     // 上报任务结束（含最终计数），无论正常完成还是异常/停止
@@ -1126,8 +1313,18 @@ async function runTask(cfg) {
         dms_total: totalDMs
       });
     }
+    // 任务列表终态：用户停止→stopped；运行异常→interrupted；正常跑完→completed
+    if (currentRecord) {
+      currentRecord.status = task.stopRequested ? 'stopped' : (taskError ? 'interrupted' : 'completed');
+      currentRecord.endedAt = Date.now();
+      currentRecord.progress = { ...task.progress };
+      syncStats();
+      await persistTaskRecord(currentRecord);
+      currentRecord = null;
+    }
     task.running = false;
     task.paused = false;
+    task.recordId = null;
     broadcastState();
   }
 }
@@ -1187,6 +1384,8 @@ async function handleMessage(msg, sender) {
       } catch (e) { authDiag.error = e && e.message; }
       log('info', '面板打开：登录态 ' + (curAuth ? '已登录 ' + curAuth.phone : '未登录') +
         '（本地=' + (authDiag.local || '无') + '，同步=' + (authDiag.sync || '无') + '）');
+      // 面板拉取状态时顺手 reconcile：被关机/SW 回收打断的任务在这里标记为已中断
+      const taskList = await reconcileInterruptedTasks();
       return {
         ok: true,
         settings: await safe(getSettings, {}),
@@ -1196,6 +1395,7 @@ async function handleMessage(msg, sender) {
         auth: curAuth,
         authDiag,
         task: { ...task, progress: { ...task.progress } },
+        tasks: taskList.map(taskSummary),
         logs: logs.slice(-200),
         modelOptions: MODEL_OPTIONS
       };
@@ -1256,11 +1456,18 @@ async function handleMessage(msg, sender) {
       }
     case 'START_TASK':
       if (task.running) return { ok: false, error: '任务已在运行中' };
-      if (!msg.products || !msg.products.length) return { ok: false, error: '请选择至少一个产品' };
-      if (!msg.keywords || !msg.keywords.length) return { ok: false, error: '请至少填写一个关键词' };
       // 登录门禁：未通过手机号验证码登录不允许使用
       const auth = await getAuth();
       if (!auth || !auth.phone) return { ok: false, error: '请先使用手机号验证码登录' };
+      if (msg.taskId) {
+        // 重新执行历史任务：沿用其参数快照，新建一条任务记录
+        const old = (await getTaskHistory()).find((r) => r.id === msg.taskId);
+        if (!old) return { ok: false, error: '任务记录不存在或已删除' };
+        runTask({ products: old.params.products, keywords: old.params.keywords, phone: auth.phone });
+        return { ok: true };
+      }
+      if (!msg.products || !msg.products.length) return { ok: false, error: '请选择至少一个产品' };
+      if (!msg.keywords || !msg.keywords.length) return { ok: false, error: '请至少填写一个关键词' };
       runTask({ products: msg.products, keywords: normalizeKeywords(msg.keywords), phone: auth.phone });
       return { ok: true };
     case 'STOP_TASK':
@@ -1268,11 +1475,73 @@ async function handleMessage(msg, sender) {
       log('warn', '已请求停止任务（当前步骤完成后停止）');
       return { ok: true };
     case 'PAUSE_TASK':
-      if (task.running) { task.paused = true; log('warn', '任务已暂停'); broadcastState(); }
+      if (task.running) {
+        task.paused = true;
+        log('warn', '任务已暂停');
+        // 同步任务列表记录状态（进度已由 broadcastState 实时同步进记录）
+        if (currentRecord) {
+          currentRecord.status = 'paused';
+          persistTaskRecord(currentRecord);
+        }
+        broadcastState();
+      }
       return { ok: true };
     case 'RESUME_TASK':
-      if (task.running && task.paused) { task.paused = false; log('info', '任务已继续'); broadcastState(); }
+      if (task.running && task.paused) {
+        task.paused = false;
+        log('info', '任务已继续');
+        if (currentRecord) {
+          currentRecord.status = 'running';
+          persistTaskRecord(currentRecord);
+        }
+        broadcastState();
+      }
       return { ok: true };
+    case 'CONTINUE_TASK': {
+      // 断点续跑：从任务记录的中断处继续（应对暂停/停止/电脑关机）
+      if (task.running) return { ok: false, error: '任务已在运行中' };
+      const auth = await getAuth();
+      if (!auth || !auth.phone) return { ok: false, error: '请先使用手机号验证码登录' };
+      const rec = (await getTaskHistory()).find((r) => r.id === msg.taskId);
+      if (!rec) return { ok: false, error: '任务记录不存在或已删除' };
+      if (rec.status === 'running') return { ok: false, error: '该任务正在运行中' };
+      runTask({
+        record: rec,
+        resume: {
+          cursor: rec.cursor || { gi: 0, ki: 0, doneNoteIds: [] },
+          progress: rec.progress || null,
+          stats: rec.stats || null,
+          reportRunId: rec.reportRunId || null
+        },
+        phone: auth.phone
+      });
+      return { ok: true };
+    }
+    case 'DELETE_TASK': {
+      if (task.running && currentRecord && currentRecord.id === msg.taskId) {
+        return { ok: false, error: '运行中的任务不能删除' };
+      }
+      const list = (await getTaskHistory()).filter((r) => r.id !== msg.taskId);
+      await saveTaskHistory(list);
+      const tasks = list.map(taskSummary);
+      broadcast({ type: 'tasks', tasks });
+      return { ok: true, tasks };
+    }
+    case 'CLEAR_TASKS': {
+      // 只清掉已结束的任务记录；运行中的保留
+      const list = (await getTaskHistory()).filter(
+        (r) => task.running && currentRecord && r.id === currentRecord.id
+      );
+      await saveTaskHistory(list);
+      const tasks = list.map(taskSummary);
+      broadcast({ type: 'tasks', tasks });
+      log('info', '已清空结束的任务记录');
+      return { ok: true, tasks };
+    }
+    case 'GET_TASKS': {
+      const list = await reconcileInterruptedTasks();
+      return { ok: true, tasks: list.map(taskSummary) };
+    }
     case 'CLEAR_LOGS':
       logs = [];
       await storageSet({ logs: [] });
@@ -1311,6 +1580,9 @@ chrome.runtime.onConnect.addListener((port) => {
   // 连接后立即推送当前状态与日志
   port.postMessage({ type: 'state', state: { ...task, progress: { ...task.progress } } });
   port.postMessage({ type: 'logs', logs: logs.slice(-200) });
+  getTaskSummaries().then((tasks) => {
+    try { port.postMessage({ type: 'tasks', tasks }); } catch (e) { /* 端口已断开，忽略 */ }
+  });
 });
 
 // ===== 安装初始化 =====

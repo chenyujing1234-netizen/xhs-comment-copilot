@@ -6,6 +6,7 @@ let state = {
   keywords: [],
   auth: null,
   task: { running: false, paused: false },
+  tasks: [],
   modelOptions: []
 };
 
@@ -22,20 +23,46 @@ function send(msg) {
 }
 
 // 长连接端口：接收日志与状态推送
-const port = chrome.runtime.connect({ name: 'panel' });
-port.onMessage.addListener((msg) => {
+let port = null;
+function onPanelMessage(msg) {
   if (msg.type === 'log') {
     appendLog(msg.entry);
     if (msg.entry.level === 'error' || msg.entry.level === 'warn') scrollLogs();
   } else if (msg.type === 'state') {
     state.task = msg.state;
     renderStatus();
+  } else if (msg.type === 'tasks') {
+    state.tasks = msg.tasks || [];
+    renderTaskList();
   } else if (msg.type === 'logs') {
     renderLogs(msg.logs);
   } else if (msg.type === 'logsCleared') {
     clearLogs();
   }
-});
+}
+function connectPanel() {
+  try {
+    port = chrome.runtime.connect({ name: 'panel' });
+  } catch (e) { return; }
+  port.onMessage.addListener(onPanelMessage);
+  port.onDisconnect.addListener(() => {
+    // SW 可能被回收/重启（任务会因此中断）：稍等后重连并重拉状态，
+    // 后台此时已把运行中的记录标记为「已中断」，面板刷新后即可继续执行
+    setTimeout(() => { connectPanel(); refreshState(); }, 1500);
+  });
+}
+// 重连/手动刷新：重新拉取后台状态（任务、日志、任务列表）
+async function refreshState() {
+  const resp = await send({ type: 'GET_STATE' });
+  if (!resp || !resp.ok) return;
+  state.settings = resp.settings || state.settings;
+  state.task = resp.task || state.task;
+  state.tasks = resp.tasks || [];
+  renderStatus();
+  renderTaskList();
+  renderLogs(resp.logs || []);
+}
+connectPanel();
 
 // ===== 日志 =====
 function appendLog(entry) {
@@ -119,6 +146,124 @@ function renderStatus() {
     $('progressText').textContent = '未开始';
     $('progressBar').style.width = '0';
   }
+}
+
+// ===== 任务列表 =====
+const TASK_STATUS = {
+  running: { label: '运行中', cls: 'running' },
+  paused: { label: '已暂停', cls: 'paused' },
+  stopped: { label: '已停止', cls: 'stopped' },
+  completed: { label: '已完成', cls: 'completed' },
+  interrupted: { label: '已中断', cls: 'interrupted' }
+};
+function fmtTime(ts) {
+  if (!ts) return '--';
+  const d = new Date(ts);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+// 运行中的任务：与后台广播的 recordId 对应，用实时进度渲染
+function liveTaskFor(t) {
+  if (state.task && state.task.running && state.task.recordId === t.id) return state.task;
+  return null;
+}
+function renderTaskList() {
+  const box = $('taskList');
+  if (!box) return;
+  const list = state.tasks || [];
+  box.innerHTML = '';
+  if (!list.length) {
+    box.innerHTML = '<p class="test-result">暂无任务记录。开始任务后会自动出现在这里。</p>';
+    return;
+  }
+  list.forEach((t) => box.appendChild(buildTaskItem(t)));
+}
+function buildTaskItem(t) {
+  const st = TASK_STATUS[t.status] || TASK_STATUS.stopped;
+  const live = liveTaskFor(t);
+  const item = document.createElement('div');
+  item.className = 'task-item';
+
+  // 头部：状态徽章 + 起止时间
+  const head = document.createElement('div');
+  head.className = 't-head';
+  head.innerHTML =
+    '<span class="badge ' + st.cls + '">' + st.label + '</span>' +
+    '<span class="t-time">' + fmtTime(t.startedAt) + ' → ' + (t.endedAt ? fmtTime(t.endedAt) : '进行中') + '</span>';
+  item.appendChild(head);
+
+  // 参数摘要
+  const meta = document.createElement('div');
+  meta.className = 'task-meta';
+  meta.textContent = '产品：' + ((t.productNames || []).join('、') || '无产品') +
+    ' · 关键词 ' + (t.keywordCount || 0) + ' 个 · 账号：' + (t.phone || '未记录');
+  item.appendChild(meta);
+
+  // 进度与统计（运行中任务用实时进度）
+  const p = (live && live.progress) || t.progress || {};
+  const s = t.stats || {};
+  const prog = document.createElement('div');
+  prog.className = 'task-progress';
+  prog.textContent = '关键词 ' + (p.keyword || 0) + '/' + (p.keywordTotal || 0) +
+    ' · 已评论 ' + (p.done || 0) +
+    ' · 已回复 ' + (s.replies || 0) +
+    ' · 已私信 ' + (p.dms || 0);
+  item.appendChild(prog);
+
+  // 操作按钮：运行中只提示；可续跑的给「继续执行」；完成的给「重新执行」
+  const actions = document.createElement('div');
+  actions.className = 'task-actions';
+  if (live) {
+    actions.innerHTML = live.paused
+      ? '<button class="btn btn-small btn-primary" data-act="resume" data-id="' + t.id + '">继续</button>'
+      : '<span class="t-time">运行中，可在「运行」页查看实时日志与控制</span>';
+  } else if (t.status === 'completed') {
+    actions.innerHTML =
+      '<button class="btn btn-small" data-act="rerun" data-id="' + t.id + '">重新执行</button>' +
+      '<button class="btn btn-small btn-danger" data-act="delete" data-id="' + t.id + '">删除</button>';
+  } else if (t.status === 'stopped' || t.status === 'interrupted' || t.status === 'paused') {
+    actions.innerHTML =
+      '<button class="btn btn-small btn-primary" data-act="continue" data-id="' + t.id + '">继续执行</button>' +
+      '<button class="btn btn-small" data-act="rerun" data-id="' + t.id + '">重新执行</button>' +
+      '<button class="btn btn-small btn-danger" data-act="delete" data-id="' + t.id + '">删除</button>';
+  }
+  item.appendChild(actions);
+  return item;
+}
+// 任务列表按钮统一事件委托（列表会随广播频繁重渲，避免逐按钮绑定）
+function bindTaskList() {
+  $('taskList').addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const id = btn.dataset.id;
+    if (btn.dataset.act === 'resume') {
+      await send({ type: 'RESUME_TASK' });
+    } else if (btn.dataset.act === 'continue') {
+      // 断点续跑：成功即切到运行页看实时进度
+      const r = await send({ type: 'CONTINUE_TASK', taskId: id });
+      if (r.ok) switchTab('run');
+      else flash('继续执行失败：' + (r.error || '未知'), false);
+    } else if (btn.dataset.act === 'rerun') {
+      // 重新执行：沿用该记录的参数快照，新建一条任务记录
+      const r = await send({ type: 'START_TASK', taskId: id });
+      if (r.ok) switchTab('run');
+      else flash('重新执行失败：' + (r.error || '未知'), false);
+    } else if (btn.dataset.act === 'delete') {
+      if (!confirm('确定删除这条任务记录？')) return;
+      const r = await send({ type: 'DELETE_TASK', taskId: id });
+      if (!r.ok) flash('删除失败：' + (r.error || '未知'), false);
+    }
+  });
+  $('btnRefreshTasks').addEventListener('click', async () => {
+    const r = await send({ type: 'GET_TASKS' });
+    if (r.ok) { state.tasks = r.tasks || []; renderTaskList(); }
+  });
+  $('btnClearTasks').addEventListener('click', async () => {
+    if (!confirm('确定清空所有已结束的任务记录？运行中的任务会保留。')) return;
+    const r = await send({ type: 'CLEAR_TASKS' });
+    if (r.ok) { state.tasks = r.tasks || []; renderTaskList(); flash('已清空结束的任务记录', true); }
+    else flash('操作失败：' + (r.error || '未知'), false);
+  });
 }
 
 // ===== 产品 =====
@@ -388,6 +533,7 @@ async function init() {
     state.keywords = resp.keywords || [];
     state.auth = resp.auth || null;
     state.task = resp.task || {};
+    state.tasks = resp.tasks || [];
     state.modelOptions = resp.modelOptions || [];
     // 登录态判定优先执行：后续任一渲染异常都不能让面板卡在登录页
     // （曾因 fillKeywordsForm 抛 TypeError 中断 init，导致每次重开都要求重新登录）
@@ -398,6 +544,7 @@ async function init() {
       fillKeywordsForm();
       renderLogs(resp.logs || []);
       renderStatus();
+      renderTaskList();
     } catch (e) {
       console.error('面板渲染失败：', e);
     }
@@ -418,14 +565,13 @@ async function init() {
 }
 
 // ===== 事件绑定 =====
+function switchTab(name) {
+  document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('active', x.dataset.tab === name));
+  document.querySelectorAll('.panel').forEach((x) => x.classList.toggle('active', x.id === 'tab-' + name));
+}
 function bindTabs() {
   document.querySelectorAll('.tab').forEach((t) => {
-    t.addEventListener('click', () => {
-      document.querySelectorAll('.tab').forEach((x) => x.classList.remove('active'));
-      document.querySelectorAll('.panel').forEach((x) => x.classList.remove('active'));
-      t.classList.add('active');
-      $('tab-' + t.dataset.tab).classList.add('active');
-    });
+    t.addEventListener('click', () => switchTab(t.dataset.tab));
   });
 }
 
@@ -554,4 +700,5 @@ function exportLogs() {
 bindTabs();
 bindLoginEvents();
 bindEvents();
+bindTaskList();
 init();
