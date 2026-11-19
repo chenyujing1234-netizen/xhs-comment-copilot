@@ -205,7 +205,31 @@ body.not-logged #btnStop { display: none; }
 .kw-group-name { font-weight: 600; }
 .kw-count { font-size: 12px; color: var(--muted); }
 .kw-group-head button { margin-left: auto; }
-.kw-group textarea { width: 100%; border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font-size: 13px; font-family: inherit; resize: vertical; }
+
+/* 优质关键词库：chips + 单条删除 */
+.kw-lib { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.kw-lib-empty { font-size: 12px; color: var(--muted); }
+.kw-chip {
+  display: inline-flex; align-items: center; gap: 4px;
+  padding: 3px 6px 3px 10px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface-2); font-size: 13px;
+}
+.kw-del {
+  border: none; background: none; cursor: pointer; color: var(--muted);
+  font-size: 14px; line-height: 1; padding: 0 2px; border-radius: 50%;
+}
+.kw-del:hover { color: var(--danger, #d03050); }
+
+/* 手动添加一行 */
+.kw-add { display: flex; gap: 8px; margin-bottom: 8px; }
+.kw-add input { flex: 1; border: 1px solid var(--border); border-radius: 6px; padding: 6px 9px; font-size: 13px; font-family: inherit; }
+
+/* AI 候选词：复选框列表 + 移入操作 */
+.kw-cand { border: 1px dashed var(--border); border-radius: 8px; padding: 8px 10px; background: #fcfcfc; }
+.kw-cand-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 6px; }
+.kw-cand-head span { font-size: 12px; color: var(--muted); margin-right: auto; }
+.kw-cand-list { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+.kw-cand-item { display: inline-flex; align-items: center; gap: 5px; font-size: 13px; cursor: pointer; }
 
 /* 产品列表内的关键词计数（与关键词分组呼应） */
 .product-item .p-kwcount { font-size: 12px; color: var(--muted); }

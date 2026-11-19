@@ -6,6 +6,8 @@ const DEFAULT_SETTINGS = {
   // 大模型 Key 不放默认值：请在「设置 → 模型与接口设置」中填写自己的 Key
   apiKey: '',
   model: 'qwen3.7-plus',
+  // 关键词生成专用模型：默认用更强的旗舰（一次性重推理任务）；评论/回复仍用上面的 model
+  keywordModel: 'qwen4-max-preview',
   commentMaxLen: 25,
   commentMinLen: 6,
   // 拟人化时间区间（秒）
@@ -167,6 +169,26 @@ async function getKeywords() {
 }
 async function saveKeywords(k) {
   await storageSet({ keywords: k || [] });
+}
+
+// ===== 优质关键词库（每个产品的固定词库，任务只从这里取词）=====
+// 与旧版 keywords 分开存储：库是人工筛选沉淀的结果，增删即时生效
+async function getQualityKeywords() {
+  return normalizeKeywords(await storageGet('qualityKeywords', []));
+}
+async function saveQualityKeywords(k) {
+  await storageSet({ qualityKeywords: k || [] });
+}
+// 首次读取：把旧版关键词整体迁入优质库（历史数据不丢），只迁移一次
+async function ensureQualityKeywords() {
+  const stored = await chrome.storage.local.get('qualityKeywords');
+  if (stored.qualityKeywords === undefined) {
+    const legacy = await getKeywords();
+    await saveQualityKeywords(legacy);
+    if (legacy.length) log('info', `已将原有 ${legacy.length} 个关键词迁入优质关键词库`);
+    return legacy;
+  }
+  return normalizeKeywords(stored.qualityKeywords);
 }
 
 // ===== 任务历史记录（任务列表 + 断点续跑）=====
@@ -461,7 +483,7 @@ async function callLLM(messages, opts = {}) {
   const base = (settings.baseUrl || DEFAULT_SETTINGS.baseUrl).replace(/\/+$/, '');
   const url = base + '/chat/completions';
   const body = {
-    model: settings.model || 'qwen3.7-plus',
+    model: opts.model || settings.model || 'qwen3.7-plus',
     messages,
     temperature: opts.temperature !== undefined ? opts.temperature : 0.85,
     top_p: 0.9
@@ -493,6 +515,9 @@ async function callLLM(messages, opts = {}) {
 // 避免出现与产品无关、或产品根本满足不了搜索者需求的词。
 // ===== 关键词生成（按产品逐个生成，保证关键词与产品一一对应）=====
 async function generateKeywordsForProduct(product) {
+  const settings = await getSettings();
+  // 关键词生成单独用更强的模型（keywordModel），效果不好时可在设置里更换
+  const keywordModel = settings.keywordModel || settings.model || 'qwen4-max-preview';
   const sys =
     '你是小红书搜索行为分析专家。你的唯一标准是：搜这个词的人，是不是这个产品的潜在客户，' +
     '并且他的需求这个产品是否真的能满足。产品做不到的需求，一概不生成对应关键词。';
@@ -522,7 +547,7 @@ async function generateKeywordsForProduct(product) {
       { role: 'system', content: sys },
       { role: 'user', content: user }
     ],
-    { json: true, temperature: 0.5 }
+    { json: true, temperature: 0.5, model: keywordModel }
   );
 
   let parsed;
@@ -885,7 +910,7 @@ async function runTask(cfg) {
   const keywords = isResume ? normalizeKeywords(cfg.record.params.keywords) : normalizeKeywords(cfg.keywords || []);
   const groups = buildProductGroups(products, keywords, settings.maxKeywordsPerTask);
   if (!groups.length) {
-    log('error', '任务未启动：所选产品没有任何归属关键词，请先在「关键词」页生成');
+    log('error', '任务未启动：所选产品的优质关键词库为空，请先在「关键词」页生成并移入库');
     task.running = false;
     task.paused = false;
     broadcastState();
@@ -1223,7 +1248,7 @@ async function runTask(cfg) {
                   });
                 }
 
-                // ===== 给感兴趣的用户发私信（导航到其主页发送） =====
+                // ===== 给感兴趣的用户发私信（导航到会话页发送） =====
                 if (settings.enablePrivateMessage && !task.stopRequested) {
                   for (const p of picked.slice(0, settings.maxDMsPerNote)) {
                     if (task.stopRequested) break;
@@ -1234,7 +1259,23 @@ async function runTask(cfg) {
                       log('warn', `「${target.name}」没有主页链接，无法私信`);
                       continue;
                     }
-                    if (target.userId && (await isAlreadyDmed(target.userId))) {
+                    // 实测（2026-11-19，浏览器验证）：
+                    // /chat/{userId} 只对【已有会话】的用户有效，对新用户是“点击消息开启会话”空状态，
+                    // 输入框永远不出现（这就是“私信输入框未出现/私信页加载超时”报错的原因）。
+                    // 正确入口是 /chat?openUid={userId}：已有会话直接打开，新用户会创建会话并显示输入栏。
+                    let dmUid = target.userId;
+                    if (!dmUid) {
+                      // 评论没带上主页 ID：先落地主页，从主页 URL 里取 userId（主页链接即 /user/profile/{id}）
+                      await navigateAndWait(tab.id, target.userUrl);
+                      const ping = await sendContent(tab.id, { type: 'PING' });
+                      const m = ping && ping.url ? ping.url.match(/\/user\/profile\/([0-9a-zA-Z]+)/) : null;
+                      dmUid = m ? m[1] : '';
+                      if (!dmUid) {
+                        log('warn', `「${target.name}」无法获取 userId，跳过私信`);
+                        continue;
+                      }
+                    }
+                    if (await isAlreadyDmed(dmUid)) {
                       log('info', `已给「${target.name}」发过私信，跳过`);
                       continue;
                     }
@@ -1247,11 +1288,7 @@ async function runTask(cfg) {
                     }
                     log('info', `准备给「${target.name}」发私信：${dm}`);
                     await humanSleep(settings.dmDelayMin, settings.dmDelayMax, '私信前随机间隔');
-                    // 实测：主页「发消息」按钮点击不稳定，直接进入与该用户的会话页 /chat/{userId} 最可靠
-                    // （userId 与主页链接中的一致；拿不到 userId 时退回主页，由 content 点「发消息」）
-                    const dmUrl = target.userId
-                      ? 'https://www.xiaohongshu.com/chat/' + encodeURIComponent(target.userId)
-                      : target.userUrl;
+                    const dmUrl = 'https://www.xiaohongshu.com/chat?openUid=' + encodeURIComponent(dmUid);
                     await navigateAndWait(tab.id, dmUrl);
                     const chatReady = await waitForPageType(tab.id, 'chat', 25000);
                     if (!chatReady) {
@@ -1263,7 +1300,7 @@ async function runTask(cfg) {
                         note_url: note.url || '',
                         note_title: info.title || '',
                         target_name: target.name,
-                        target_user_id: target.userId || '',
+                        target_user_id: dmUid,
                         dm_text: dm,
                         ok: false,
                         error: '私信页加载超时'
@@ -1277,7 +1314,7 @@ async function runTask(cfg) {
                       task.progress.dms = totalDMs;
                       syncStats();
                       log('success', `已给「${target.name}」发送私信`);
-                      await recordDmed(target.userId, target.name);
+                      await recordDmed(dmUid, target.name);
                     } else {
                       log('error', `给「${target.name}」发私信失败：${(dr && dr.error) || '未知原因'}`);
                     }
@@ -1288,7 +1325,7 @@ async function runTask(cfg) {
                       note_url: note.url || '',
                       note_title: info.title || '',
                       target_name: target.name,
-                      target_user_id: target.userId || '',
+                      target_user_id: dmUid,
                       dm_text: dm,
                       ok: !!(dr && dr.ok),
                       error: (dr && dr.ok) ? '' : ((dr && dr.error) || '未知原因')
@@ -1421,7 +1458,7 @@ async function handleMessage(msg, sender) {
         ok: true,
         settings: await safe(getSettings, {}),
         products: await safe(getProducts, []),
-        keywords: await safe(getKeywords, []),
+        qualityKeywords: await safe(ensureQualityKeywords, []),
         commentedNotes: await safe(getCommentedNotes, []),
         auth: curAuth,
         authDiag,
@@ -1452,9 +1489,32 @@ async function handleMessage(msg, sender) {
         }
       }
       return { ok: true };
-    case 'SAVE_KEYWORDS':
-      await saveKeywords(msg.keywords);
-      return { ok: true };
+    case 'ADD_QUALITY_KEYWORDS': {
+      // 把 AI 候选词（或手动添加）移入优质库：同产品同词去重，返回最新库与新增/跳过数
+      const list = normalizeKeywords(msg.keywords || []);
+      const cur = await getQualityKeywords();
+      const seen = new Set(cur.map((k) => k.productId + '\u0000' + k.text));
+      let added = 0;
+      let skipped = 0;
+      for (const k of list) {
+        const key = k.productId + '\u0000' + k.text;
+        if (seen.has(key)) { skipped++; continue; }
+        seen.add(key);
+        cur.push(k);
+        added++;
+      }
+      await saveQualityKeywords(cur);
+      log('info', `优质库新增 ${added} 个关键词${skipped ? `（${skipped} 个已存在，跳过）` : ''}`);
+      return { ok: true, added, skipped, keywords: cur };
+    }
+    case 'REMOVE_QUALITY_KEYWORD': {
+      const text = String(msg.text || '').trim();
+      const productId = msg.productId || '';
+      const cur = await getQualityKeywords();
+      const next = cur.filter((k) => !(k.text === text && k.productId === productId));
+      await saveQualityKeywords(next);
+      return { ok: true, keywords: next };
+    }
     case 'GENERATE_KEYWORDS':
       if (!msg.products || !msg.products.length) return { ok: false, error: '请先选择产品' };
       try {
@@ -1466,7 +1526,7 @@ async function handleMessage(msg, sender) {
         if (res.cannotDo.length) {
           log('info', '产品做不到（相关词已排除）：' + res.cannotDo.join('；'));
         }
-        log('success', `已生成 ${res.keywords.length} 个关键词`);
+        log('success', `已生成 ${res.keywords.length} 个候选关键词，请在面板中勾选移入优质库`);
         return { ok: true, keywords: res.keywords };
       } catch (e) {
         log('error', `关键词生成失败：${e.message}`);
@@ -1498,8 +1558,12 @@ async function handleMessage(msg, sender) {
         return { ok: true };
       }
       if (!msg.products || !msg.products.length) return { ok: false, error: '请选择至少一个产品' };
-      if (!msg.keywords || !msg.keywords.length) return { ok: false, error: '请至少填写一个关键词' };
-      runTask({ products: msg.products, keywords: normalizeKeywords(msg.keywords), phone: auth.phone });
+      // 任务只跑优质关键词库：按所选产品从库里取词（界面传入的关键词不作为来源）
+      const library = await getQualityKeywords();
+      const selIds = new Set(msg.products.map((p) => p.id));
+      const libKw = library.filter((k) => selIds.has(k.productId));
+      if (!libKw.length) return { ok: false, error: '所选产品的优质关键词库为空，请先在「关键词」页生成并移入库' };
+      runTask({ products: msg.products, keywords: libKw, phone: auth.phone });
       return { ok: true };
     case 'STOP_TASK':
       task.stopRequested = true;

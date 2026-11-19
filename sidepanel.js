@@ -3,7 +3,8 @@
 let state = {
   settings: {},
   products: [],
-  keywords: [],
+  qualityKeywords: [],
+  candidates: [],
   auth: null,
   task: { running: false, paused: false },
   tasks: [],
@@ -58,6 +59,10 @@ async function refreshState() {
   state.settings = resp.settings || state.settings;
   state.task = resp.task || state.task;
   state.tasks = resp.tasks || [];
+  if (resp.qualityKeywords) {
+    state.qualityKeywords = resp.qualityKeywords;
+    renderKeywordGroups();
+  }
   renderStatus();
   renderTaskList();
   renderLogs(resp.logs || []);
@@ -363,6 +368,16 @@ function fillSettingsForm() {
     if (m === s.model) opt.selected = true;
     modelSel.appendChild(opt);
   });
+
+  const kwModelSel = $('keywordModel');
+  kwModelSel.innerHTML = '';
+  const kwModels = state.modelOptions && state.modelOptions.length ? state.modelOptions : [s.keywordModel || 'qwen4-max-preview'];
+  kwModels.forEach((m) => {
+    const opt = document.createElement('option');
+    opt.value = m; opt.textContent = m;
+    if (m === s.keywordModel) opt.selected = true;
+    kwModelSel.appendChild(opt);
+  });
 }
 
 function collectSettingsForm() {
@@ -374,6 +389,7 @@ function collectSettingsForm() {
     baseUrl: $('baseUrl').value.trim(),
     apiKey: $('apiKey').value.trim(),
     model: $('model').value,
+    keywordModel: $('keywordModel').value,
     commentMinLen: num('commentMinLen'),
     commentMaxLen: num('commentMaxLen'),
     reportUrl: $('reportUrl').value.trim(),
@@ -476,15 +492,15 @@ function bindLoginEvents() {
   });
 }
 
-// ===== 关键词（按产品分组，对应关系在界面上直接可见）=====
-// 每个勾选产品一组：组头显示产品名 + 实时数量 + 单独「AI 生成」按钮，组内每行一个关键词。
-// 属于未勾选产品的关键词也会成组展示并原样保留（不会被保存时静默删除）；
-// 历史遗留的无归属关键词归入「未归属」组，仍按第一个勾选产品执行。
+// ===== 关键词（优质库 + AI 候选词）=====
+// 每个勾选产品一组：组内上方是固定的「优质关键词库」（任务只从这里取词），
+// AI 生成的结果是候选词（默认全选），勾选后移入优质库，也可一键全部移入。
+// 属于未勾选产品的库内关键词也会成组展示并原样保留（切页不丢）。
 function keywordGroupModel() {
   const products = collectProductsFromDOM();
   const selected = products.filter((p) => p.selected && p.name);
   const byId = new Map();
-  for (const k of state.keywords || []) {
+  for (const k of state.qualityKeywords || []) {
     const pid = k.productId || '';
     if (!byId.has(pid)) byId.set(pid, { productId: pid, productName: k.productName || '未归属', texts: [] });
     if (k.text) byId.get(pid).texts.push(String(k.text));
@@ -506,6 +522,24 @@ function keywordGroupModel() {
       note: pid ? '（未勾选，不会执行）' : '（未归属，按第一个勾选产品执行）'
     });
   }
+  // AI 候选词按产品归拢到对应组
+  const candByPid = new Map();
+  for (const c of state.candidates || []) {
+    if (!candByPid.has(c.productId)) candByPid.set(c.productId, []);
+    candByPid.get(c.productId).push(c);
+  }
+  for (const g of groups.concat(orphans)) g.candidates = candByPid.get(g.productId) || [];
+  // 候选词对应的产品未勾选/已删除：补一个组展示，保证候选词不丢
+  for (const [pid, cs] of candByPid) {
+    if (groups.concat(orphans).some((g) => g.productId === pid)) continue;
+    orphans.push({
+      productId: pid,
+      productName: cs[0].productName || '未归属',
+      texts: [],
+      note: '（产品未勾选，移入后不会执行）',
+      candidates: cs
+    });
+  }
   return { groups, orphans };
 }
 
@@ -522,7 +556,7 @@ function buildKwGroup(g) {
   name.textContent = g.productName + g.note;
   const count = document.createElement('span');
   count.className = 'kw-count';
-  count.textContent = g.texts.length + ' 个';
+  count.textContent = '优质库 ' + g.texts.length + ' 个';
   head.appendChild(name);
   head.appendChild(count);
   if (!g.note) {
@@ -532,13 +566,87 @@ function buildKwGroup(g) {
     btn.dataset.genFor = g.productId;
     head.appendChild(btn);
   }
-  const ta = document.createElement('textarea');
-  ta.className = 'kw-input';
-  ta.rows = Math.min(10, Math.max(3, g.texts.length + 1));
-  ta.placeholder = '每行一个关键词';
-  ta.value = g.texts.join('\n');
   div.appendChild(head);
-  div.appendChild(ta);
+
+  // 优质关键词库：chips，单条可删除
+  const lib = document.createElement('div');
+  lib.className = 'kw-lib';
+  if (!g.texts.length) {
+    const empty = document.createElement('span');
+    empty.className = 'kw-lib-empty';
+    empty.textContent = '暂无关键词：AI 生成后移入，或在下方手动添加';
+    lib.appendChild(empty);
+  }
+  for (const text of g.texts) {
+    const chip = document.createElement('span');
+    chip.className = 'kw-chip';
+    chip.textContent = text;
+    const del = document.createElement('button');
+    del.className = 'kw-del';
+    del.title = '从优质库删除';
+    del.textContent = '×';
+    del.dataset.delKw = text;
+    chip.appendChild(del);
+    lib.appendChild(chip);
+  }
+  div.appendChild(lib);
+
+  // 手动添加一行
+  const addRow = document.createElement('div');
+  addRow.className = 'kw-add';
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.placeholder = '手动添加关键词，回车加入优质库';
+  const addBtn = document.createElement('button');
+  addBtn.className = 'btn btn-small';
+  addBtn.textContent = '添加';
+  addRow.appendChild(input);
+  addRow.appendChild(addBtn);
+  div.appendChild(addRow);
+
+  // AI 候选词：默认全选的复选框列表 + 移入操作
+  if (g.candidates && g.candidates.length) {
+    const cand = document.createElement('div');
+    cand.className = 'kw-cand';
+    const chead = document.createElement('div');
+    chead.className = 'kw-cand-head';
+    const ctitle = document.createElement('span');
+    ctitle.textContent = 'AI 候选词（默认全选，取消勾选跳过不合适的）';
+    const btnAll = document.createElement('button');
+    btnAll.className = 'btn btn-small btn-primary';
+    btnAll.textContent = '一键全部移入';
+    btnAll.dataset.candAll = '1';
+    const btnSel = document.createElement('button');
+    btnSel.className = 'btn btn-small';
+    btnSel.textContent = '移入选中';
+    btnSel.dataset.candSel = '1';
+    const btnDrop = document.createElement('button');
+    btnDrop.className = 'btn btn-small';
+    btnDrop.textContent = '丢弃';
+    btnDrop.dataset.candDrop = '1';
+    chead.appendChild(ctitle);
+    chead.appendChild(btnAll);
+    chead.appendChild(btnSel);
+    chead.appendChild(btnDrop);
+    cand.appendChild(chead);
+    const list = document.createElement('div');
+    list.className = 'kw-cand-list';
+    for (const c of g.candidates) {
+      const label = document.createElement('label');
+      label.className = 'kw-cand-item';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.checked = c.selected !== false;
+      cb.dataset.candText = c.text;
+      const txt = document.createElement('span');
+      txt.textContent = c.text;
+      label.appendChild(cb);
+      label.appendChild(txt);
+      list.appendChild(label);
+    }
+    cand.appendChild(list);
+    div.appendChild(cand);
+  }
   return div;
 }
 
@@ -556,59 +664,74 @@ function renderKeywordGroups() {
   updateProductKwCounts();
 }
 
-// 从分组界面收集关键词（含未保存的手动编辑）；重复词只保留第一个出现的
-function collectKeywordsFromGroups() {
-  const out = [];
-  const seen = new Set();
-  document.querySelectorAll('#kwGroups .kw-group').forEach((g) => {
-    const productId = g.dataset.productId;
-    const productName = g.dataset.productName || '未归属';
-    const ta = g.querySelector('textarea');
-    const lines = (ta.value || '').split('\n').map((s) => s.trim()).filter(Boolean);
-    for (const text of lines) {
-      if (seen.has(text)) continue;
-      seen.add(text);
-      out.push({ text, productId, productName });
-    }
-  });
-  return out;
+// 移入优质库：AI 候选勾选项或手动添加；后台按产品去重，返回最新库
+async function addKeywordsToLibrary(list) {
+  if (!list.length) return flash('没有可移入的关键词', false);
+  const r = await send({ type: 'ADD_QUALITY_KEYWORDS', keywords: list });
+  if (!r.ok) return flash('移入失败：' + (r.error || '未知'), false);
+  state.qualityKeywords = r.keywords || [];
+  // 已处理的候选词从待移入列表移除（含后台去重跳过的）
+  const doneKeys = new Set(list.map((k) => k.productId + '\u0000' + k.text));
+  state.candidates = (state.candidates || []).filter((c) => !doneKeys.has(c.productId + '\u0000' + c.text));
+  renderKeywordGroups();
+  flash(`已移入优质库 ${r.added} 个${r.skipped ? `（${r.skipped} 个已存在，已跳过）` : ''}`, true);
 }
 
-// 分组下方汇总：每个产品各几个、未勾选/未归属的几个，随输入实时更新
+async function removeKeywordFromLibrary(text, productId) {
+  const r = await send({ type: 'REMOVE_QUALITY_KEYWORD', text, productId });
+  if (!r.ok) return flash('删除失败：' + (r.error || '未知'), false);
+  state.qualityKeywords = r.keywords || [];
+  renderKeywordGroups();
+}
+
+// 用新生成的候选词替换某产品的旧候选（默认全选）
+function setCandidatesForProduct(productId, list) {
+  const kept = (state.candidates || []).filter((c) => c.productId !== productId);
+  state.candidates = kept.concat(list.map((k) => ({
+    text: k.text,
+    productId: k.productId,
+    productName: k.productName,
+    selected: true
+  })));
+}
+
+// 某产品的候选词当前勾选项
+function selectedCandidates(productId) {
+  return (state.candidates || [])
+    .filter((c) => c.productId === productId && c.selected !== false)
+    .map((c) => ({ text: c.text, productId: c.productId, productName: c.productName }));
+}
+
+// 分组下方汇总：优质库每个产品几个、还有多少候选词待移入
 function updateKeywordOwnerHint() {
-  const kws = collectKeywordsFromGroups();
-  if (!kws.length) {
-    $('kwhint').textContent = '每个产品建议 10~15 个关键词；任务按产品分组，一个产品跑完再下一个';
+  const { groups, orphans } = keywordGroupModel();
+  const all = groups.concat(orphans);
+  const libCount = all.reduce((n, g) => n + g.texts.length, 0);
+  const candCount = all.reduce((n, g) => n + (g.candidates ? g.candidates.length : 0), 0);
+  if (!libCount && !candCount) {
+    $('kwhint').textContent = '优质库为空：点「AI 生成关键词」生成候选词，勾选后移入优质库';
     return;
   }
   const selIds = new Set(collectProductsFromDOM().filter((p) => p.selected && p.name).map((p) => p.id));
-  const order = [];
-  const counts = new Map();
-  for (const k of kws) {
-    if (!counts.has(k.productId)) {
-      counts.set(k.productId, { name: k.productName || '未归属', n: 0 });
-      order.push(k.productId);
-    }
-    counts.get(k.productId).n++;
-  }
-  const parts = order.map((pid) => {
-    const c = counts.get(pid);
-    const note = !pid ? '（未归属）' : (selIds.has(pid) ? '' : '（未勾选，不执行）');
-    return c.name + ' ' + c.n + ' 个' + note;
+  const parts = all.map((g) => {
+    const note = !g.productId ? '（未归属）' : (selIds.has(g.productId) ? '' : '（未勾选，不执行）');
+    return g.productName + ' ' + g.texts.length + ' 个' + note;
   });
-  $('kwhint').textContent = '共 ' + kws.length + ' 个，归属：' + parts.join(' · ');
+  let msg = '优质库共 ' + libCount + ' 个：' + parts.join(' · ');
+  if (candCount) msg += '；还有 ' + candCount + ' 个候选词待移入';
+  $('kwhint').textContent = msg;
 }
 
-// 产品列表里显示每个产品的关键词数，两个页面之间的对应关系一目了然
+// 产品列表里显示每个产品的优质库词数，两个页面之间的对应关系一目了然
 function updateProductKwCounts() {
   const counts = new Map();
-  for (const k of state.keywords || []) {
+  for (const k of state.qualityKeywords || []) {
     if (!k.productId) continue;
     counts.set(k.productId, (counts.get(k.productId) || 0) + 1);
   }
   document.querySelectorAll('.p-kwcount').forEach((el) => {
     const n = counts.get(el.dataset.id) || 0;
-    el.textContent = n ? (n + ' 个关键词') : '未生成关键词';
+    el.textContent = n ? (n + ' 个关键词') : '优质库为空';
     el.classList.toggle('zero', !n);
   });
 }
@@ -624,7 +747,7 @@ async function init() {
   if (resp && resp.ok) {
     state.settings = resp.settings || {};
     state.products = resp.products || [];
-    state.keywords = resp.keywords || [];
+    state.qualityKeywords = resp.qualityKeywords || [];
     state.auth = resp.auth || null;
     state.task = resp.task || {};
     state.tasks = resp.tasks || [];
@@ -688,7 +811,7 @@ function bindEvents() {
     flash(r.ok ? '产品已保存' : ('保存失败：' + r.error), r.ok);
   });
 
-  // 关键词
+  // 关键词（优质库 + AI 候选词）
   $('btnGenKeywords').addEventListener('click', async () => {
     const products = collectProductsFromDOM().filter((p) => p.selected && p.name);
     if (!products.length) return flash('请先在「产品」页勾选并填写产品', false);
@@ -696,67 +819,100 @@ function bindEvents() {
     const r = await send({ type: 'GENERATE_KEYWORDS', products });
     $('btnGenKeywords').disabled = false;
     if (r.ok && r.keywords && r.keywords.length) {
-      // 只替换勾选产品的关键词；未勾选产品的关键词原样保留
-      const selIds = new Set(products.map((p) => p.id));
-      const kept = collectKeywordsFromGroups().filter((k) => !selIds.has(k.productId));
-      state.keywords = kept.concat(r.keywords);
+      // 候选词整体替换：按产品归组展示，默认全选，等用户勾选后移入优质库
+      state.candidates = r.keywords.map((k) => ({
+        text: k.text,
+        productId: k.productId,
+        productName: k.productName,
+        selected: true
+      }));
       renderKeywordGroups();
-      flash(`已生成 ${r.keywords.length} 个关键词（${products.length > 1 ? '按产品分别生成，已填入对应分组' : '单个产品'}）`, true);
+      flash(`已生成 ${r.keywords.length} 个候选词（${products.length > 1 ? '按产品分别生成' : '单个产品'}），勾选后「移入优质库」`, true);
     } else {
       flash('生成失败：' + (r.error || '未知'), false);
     }
   });
-  $('btnClearKeywords').addEventListener('click', () => {
-    document.querySelectorAll('#kwGroups textarea').forEach((ta) => { ta.value = ''; });
-    updateKeywordOwnerHint();
-  });
-  $('btnSaveKeywords').addEventListener('click', async () => {
-    const keywords = collectKeywordsFromGroups();
-    state.keywords = keywords;
-    const r = await send({ type: 'SAVE_KEYWORDS', keywords });
-    if (r.ok) updateProductKwCounts();
-    flash(r.ok ? '关键词已保存' : ('保存失败：' + r.error), r.ok);
-  });
-  // 分组区：单个产品单独重新生成；输入时实时更新该组计数与归属汇总
+  // 分组区点击：AI 生成 / 删除库词 / 候选词移入与丢弃 / 手动添加
   $('kwGroups').addEventListener('click', async (e) => {
-    const btn = e.target.closest('button[data-gen-for]');
-    if (!btn) return;
-    const product = collectProductsFromDOM().find((p) => p.id === btn.dataset.genFor);
-    if (!product || !product.name) return flash('请先填写该产品名称', false);
-    btn.disabled = true;
-    const r = await send({ type: 'GENERATE_KEYWORDS', products: [product] });
-    btn.disabled = false;
-    if (r.ok && r.keywords && r.keywords.length) {
-      // 先收集界面现状（含未保存编辑），只替换该产品的分组，其他产品不动
-      const kept = collectKeywordsFromGroups().filter((k) => k.productId !== product.id);
-      state.keywords = kept.concat(r.keywords.map((k) => ({ text: k.text, productId: product.id, productName: product.name })));
+    const groupEl = e.target.closest('.kw-group');
+    if (!groupEl) return;
+    const productId = groupEl.dataset.productId;
+
+    const genBtn = e.target.closest('button[data-gen-for]');
+    if (genBtn) {
+      const product = collectProductsFromDOM().find((p) => p.id === genBtn.dataset.genFor);
+      if (!product || !product.name) return flash('请先填写该产品名称', false);
+      genBtn.disabled = true;
+      const r = await send({ type: 'GENERATE_KEYWORDS', products: [product] });
+      genBtn.disabled = false;
+      if (r.ok && r.keywords && r.keywords.length) {
+        setCandidatesForProduct(product.id, r.keywords);
+        renderKeywordGroups();
+        flash(`已为「${product.name}」生成 ${r.keywords.length} 个候选词，勾选后「移入优质库」`, true);
+      } else {
+        flash('生成失败：' + (r.error || '未知'), false);
+      }
+      return;
+    }
+    const delBtn = e.target.closest('button[data-del-kw]');
+    if (delBtn) {
+      removeKeywordFromLibrary(delBtn.dataset.delKw, productId);
+      return;
+    }
+    if (e.target.closest('button[data-cand-all]')) {
+      const list = (state.candidates || [])
+        .filter((c) => c.productId === productId)
+        .map((c) => ({ text: c.text, productId: c.productId, productName: c.productName }));
+      addKeywordsToLibrary(list);
+      return;
+    }
+    if (e.target.closest('button[data-cand-sel]')) {
+      addKeywordsToLibrary(selectedCandidates(productId));
+      return;
+    }
+    if (e.target.closest('button[data-cand-drop]')) {
+      state.candidates = (state.candidates || []).filter((c) => c.productId !== productId);
       renderKeywordGroups();
-      flash(`已为「${product.name}」生成 ${r.keywords.length} 个关键词`, true);
-    } else {
-      flash('生成失败：' + (r.error || '未知'), false);
+      return;
+    }
+    if (e.target.closest('button[data-add-for], .kw-add button')) {
+      const input = groupEl.querySelector('.kw-add input');
+      const text = (input.value || '').trim();
+      if (!text) return flash('请先输入关键词', false);
+      await addKeywordsToLibrary([{ text, productId, productName: groupEl.dataset.productName || '未归属' }]);
+      return;
     }
   });
-  $('kwGroups').addEventListener('input', (e) => {
-    if (!e.target.matches('textarea')) return;
-    const g = e.target.closest('.kw-group');
-    const n = e.target.value.split('\n').map((s) => s.trim()).filter(Boolean).length;
-    g.querySelector('.kw-count').textContent = n + ' 个';
-    updateKeywordOwnerHint();
+  // 候选词勾选/取消勾选：记进 state，不即时重渲染（避免打断勾选操作）
+  $('kwGroups').addEventListener('change', (e) => {
+    const cb = e.target;
+    if (!cb.matches('input[type="checkbox"][data-cand-text]')) return;
+    const g = cb.closest('.kw-group');
+    const c = (state.candidates || []).find((x) => x.productId === g.dataset.productId && x.text === cb.dataset.candText);
+    if (c) c.selected = cb.checked;
+  });
+  // 手动添加框回车 = 点添加
+  $('kwGroups').addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    if (!e.target.matches('.kw-add input')) return;
+    e.preventDefault();
+    e.target.closest('.kw-group').querySelector('.kw-add button').click();
   });
 
   // 运行控制
   $('btnStart').addEventListener('click', async () => {
     const products = collectProductsFromDOM().filter((p) => p.selected && p.name);
-    const keywords = collectKeywordsFromGroups();
     if (!products.length) return flash('请先在「产品」页勾选并填写产品', false);
-    if (!keywords.length) return flash('请先填写关键词（或 AI 生成）', false);
+    // 任务只跑优质库：界面只做非空校验，后台按所选产品从库里取词
+    const selIds = new Set(products.map((p) => p.id));
+    const libKw = (state.qualityKeywords || []).filter((k) => selIds.has(k.productId));
+    if (!libKw.length) return flash('所选产品的优质关键词库为空，请先生成并移入关键词', false);
 
-    // 先保存最新设置与产品、关键词
+    // 先保存最新设置与产品；关键词库的增删已实时落库，无需整体保存
     await send({ type: 'SAVE_SETTINGS', settings: collectSettingsForm() });
     await send({ type: 'SAVE_PRODUCTS', products: collectProductsFromDOM() });
-    await send({ type: 'SAVE_KEYWORDS', keywords });
 
-    const r = await send({ type: 'START_TASK', products, keywords });
+    const r = await send({ type: 'START_TASK', products });
     if (!r.ok) flash('启动失败：' + (r.error || '未知'), false);
   });
   $('btnPause').addEventListener('click', () => send({ type: 'PAUSE_TASK' }));

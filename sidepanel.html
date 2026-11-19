@@ -111,13 +111,11 @@
     <section id="tab-task" class="panel">
       <div class="card">
         <div class="card-head"><span>关键词设置</span></div>
-        <p class="test-result">关键词按产品分组管理，每行一个；任务执行时一个产品跑完再跑下一个。每个产品可单独「AI 生成」。</p>
+        <p class="test-result">每个产品有一个固定的「优质关键词库」，任务只从库里取词执行。AI 生成的是候选词：默认全选，取消勾选跳过不合适的，再「移入优质库」；也可以一键全部移入。</p>
         <div id="kwGroups" class="kw-groups"></div>
         <p id="kwhint" class="test-result"></p>
         <div class="row">
           <button id="btnGenKeywords" class="btn btn-primary">AI 生成关键词（基于所选产品）</button>
-          <button id="btnClearKeywords" class="btn">清空</button>
-          <button id="btnSaveKeywords" class="btn">保存关键词</button>
         </div>
       </div>
 
@@ -161,6 +159,10 @@
         <div class="field">
           <label>模型</label>
           <select id="model"></select>
+        </div>
+        <div class="field">
+          <label>关键词生成模型</label>
+          <select id="keywordModel"></select>
         </div>
         <div class="field-grid">
           <div class="field">

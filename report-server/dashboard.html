@@ -43,6 +43,16 @@
   a:hover { text-decoration: underline; }
   .muted { color: #8a919f; }
   .ellipsis { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  /* 长文本（评论内容/我的回复/私信内容/产品描述）：多行显示，可滚动，右下角可拖动调整大小 */
+  .txtbox {
+    display: block; width: 100%; min-height: 34px; max-height: 300px;
+    resize: vertical; overflow: auto;
+    border: 1px solid #e5e7eb; border-radius: 6px; padding: 5px 7px;
+    font-family: inherit; font-size: 12px; line-height: 1.45; color: #1f2329;
+    background: #fff; white-space: pre-wrap; word-break: break-word;
+  }
+  .txtbox:hover { border-color: #cbd5e1; }
+  .txtbox:focus { outline: none; border-color: #ff2442; }
   /* 趋势图 */
   .trend { display: flex; align-items: flex-end; gap: 10px; height: 140px; padding-top: 8px; }
   .trend .day { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; height: 100%; justify-content: flex-end; }
@@ -98,6 +108,23 @@
     return '<span class="tag ' + (ok ? 'ok">成功' : 'fail">' + esc(label || '失败')) + '</span>';
   }
 
+  // 长文本展示框：多行 + 可滚动；用户拖动右下角调整过的高度记下来，
+  // 30 秒自动刷新重绘后按原高度恢复，不用反复拖动
+  var boxSizes = {};
+  function txtBox(text, k) {
+    var t = String(text == null ? '' : text);
+    var saved = boxSizes[k + '|' + t];
+    var style = saved ? ' style="height:' + saved + '"' : '';
+    return '<textarea class="txtbox" data-k="' + k + '" readonly rows="2"' + style + '>' + esc(t) + '</textarea>';
+  }
+  function captureBoxSizes() {
+    var list = document.querySelectorAll('textarea.txtbox');
+    for (var i = 0; i < list.length; i++) {
+      var ta = list[i];
+      if (ta.style.height) boxSizes[ta.dataset.k + '|' + ta.value] = ta.style.height;
+    }
+  }
+
   function renderTrend(trend) {
     var max = 0;
     trend.forEach(function (d) { max = Math.max(max, d.comments, d.replies, d.dms || 0); });
@@ -126,6 +153,7 @@
   }
 
   function render(d) {
+    captureBoxSizes(); // 在重绘前记下用户已拖动过的文本框高度
     var s = d.summary;
     var html = '';
 
@@ -169,7 +197,7 @@
         return '<tr><td class="muted">' + esc(c.time) + '</td><td>' + esc(c.phone) + '</td>' +
           '<td><div>' + esc(c.product) + '</div><div class="muted">' + esc(c.keyword) + '</div></td>' +
           '<td class="ellipsis" title="' + esc(c.title) + '">' + link(c.url, c.title || c.url) + '</td>' +
-          '<td class="ellipsis" title="' + esc(c.text) + '">' + esc(c.text) + '</td>' +
+          '<td>' + txtBox(c.text, 'c') + '</td>' +
           '<td>' + tag(c.ok, c.error) + '</td></tr>';
       }).join('') + '</table></div>';
 
@@ -179,8 +207,8 @@
       d.replies.map(function (r) {
         return '<tr><td class="muted">' + esc(r.time) + '</td><td>' + esc(r.phone) + '</td>' +
           '<td>' + esc(r.name) + '</td>' +
-          '<td class="ellipsis" title="' + esc(r.target) + '">' + esc(r.target) + '</td>' +
-          '<td class="ellipsis" title="' + esc(r.text) + '">' + esc(r.text) + '</td>' +
+          '<td>' + txtBox(r.target, 'rt') + '</td>' +
+          '<td>' + txtBox(r.text, 'rr') + '</td>' +
           '<td class="ellipsis">' + link(r.url, r.title || '链接') + '</td>' +
           '<td>' + tag(r.ok, r.error) + '</td></tr>';
       }).join('') + '</table></div>';
@@ -192,7 +220,7 @@
         return '<tr><td class="muted">' + esc(r.time) + '</td><td>' + esc(r.phone) + '</td>' +
           '<td>' + esc(r.name) + '</td>' +
           '<td class="muted ellipsis" title="' + esc(r.user_id) + '">' + esc(r.user_id) + '</td>' +
-          '<td class="ellipsis" title="' + esc(r.text) + '">' + esc(r.text) + '</td>' +
+          '<td>' + txtBox(r.text, 'd') + '</td>' +
           '<td class="ellipsis">' + link(r.url, r.title || '链接') + '</td>' +
           '<td>' + tag(r.ok, r.error) + '</td></tr>';
       }).join('') + '</table></div>';
@@ -204,7 +232,7 @@
       d.products.map(function (p) {
         return '<tr><td>' + esc(p.phone) + '</td>' +
           '<td>' + esc(p.name) + '</td>' +
-          '<td class="ellipsis" style="max-width:420px" title="' + esc(p.description) + '">' + esc(p.description) + '</td>' +
+          '<td>' + txtBox(p.description, 'p') + '</td>' +
           '<td><span class="tag ' + (p.selected ? 'ok">已启用' : 'done">未启用') + '</span></td>' +
           '<td class="muted">' + esc(p.updated_at) + '</td></tr>';
       }).join('') + '</table>' : '<div class="muted">暂无数据</div>') + '</div>';

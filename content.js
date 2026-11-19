@@ -359,26 +359,10 @@
   }
 
   // ===== 用户主页：给感兴趣的用户发私信 =====
-  // 实测（2026-11-17）：主页入口文案为「发消息」（官方号/关闭私信的用户无此按钮）；
-  // 会话页 URL 为 /chat/{userId}，输入框 .xhs-im-input-bar-editor，发送按钮为输入栏内无文本图标按钮
-  function findDmButton() {
-    const cands = qa('button, span, div, a, [role="button"]');
-    let fallback = null;
-    for (const el of cands) {
-      const t = (el.innerText || '').trim();
-      if (t !== '私信' && t !== '发私信' && t !== '发消息') continue;
-      const hasSmaller = qa('*', el).some((c) => {
-        const ct = (c.innerText || '').trim();
-        return ct === '私信' || ct === '发私信' || ct === '发消息';
-      });
-      if (hasSmaller) continue;
-      const cls = el.getAttribute('class') || '';
-      if (/im|dm|message|chat/i.test(cls)) return el;
-      if (!fallback) fallback = el;
-    }
-    return fallback;
-  }
-
+  // 实测（2026-11-19，浏览器验证）：
+  // 主页入口文案为「发消息」，但点击它是新开标签页，本页跟不上；
+  // background 统一导航 /chat?openUid={userId}（已有会话直接打开，新用户会创建会话），
+  // 输入框为 .xhs-im-input-bar-editor，发送按钮为输入栏内无文本图标按钮
   // 私信发送按钮：输入栏（input-bar）内的按钮。小红书用无文本图标按钮，文本匹配找不到
   function findDmSubmitButton() {
     const bar = q('[class*="input-bar"]');
@@ -390,17 +374,16 @@
   }
 
   async function sendPrivateMessage(text) {
-    // 已处于会话页（background 直接导航 /chat/{userId}）时无需找主页按钮
+    // background 已导航到 /chat?openUid={userId} 并确认处于会话页，这里直接找输入框
     const inChatPage = location.pathname.indexOf('/chat') === 0;
     if (!inChatPage) {
-      const dmBtn = findDmButton();
-      if (!dmBtn) {
-        return { ok: false, error: '用户主页未找到「发消息/私信」按钮（该用户可能不接受私信）' };
+      // 兜底：落在非会话页（如 userId 缺失时退回的主页），从 URL 取 userId 再导航进会话页
+      const m = location.pathname.match(/\/user\/profile\/([0-9a-zA-Z]+)/);
+      if (m) {
+        location.href = 'https://www.xiaohongshu.com/chat?openUid=' + encodeURIComponent(m[1]);
+        return { ok: false, error: '不在会话页，已跳转会话页，请重发一次' };
       }
-      dmBtn.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      await sleep(rnd(400, 800));
-      dmBtn.click();
-      await sleep(rnd(1200, 2000));
+      return { ok: false, error: '不在会话页，且无法从当前 URL 获取 userId' };
     }
 
     // 等会话输入框出现：优先私信窗口内的 contenteditable，最后兜底取页面最后一个
