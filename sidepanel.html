@@ -152,9 +152,11 @@
           <input id="baseUrl" type="text" />
         </div>
         <div class="field">
-          <label>API Key</label>
-          <input id="apiKey" type="password" />
-          <button id="btnToggleKey" class="btn btn-small">显示</button>
+          <label>API Key（已内置，留空即用内置；如需覆盖填自己的）</label>
+          <div class="apikey-row">
+            <input id="apiKey" type="password" placeholder="sk-..." />
+            <button id="btnToggleKey" class="btn btn-small" type="button">显示</button>
+          </div>
         </div>
         <div class="field">
           <label>模型</label>
@@ -259,6 +261,27 @@
           <button id="btnClearDm" class="btn">清空私信记录</button>
         </div>
         <p class="test-result">同一用户只会私信一次；私信内容由 AI 结合对方评论生成，自然带出产品与官网。</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span>任务中断后自动重启</span></div>
+        <div class="field checkbox">
+          <label><input id="autoRestartInterrupted" type="checkbox" checked /> 启用：任务意外中断（浏览器后台被回收、网络异常、电脑休眠等）后，按下面间隔自动从断点重启任务</label>
+        </div>
+        <div class="field-grid">
+          <div class="field">
+            <label>重启间隔(分钟)</label>
+            <input id="autoRestartDelayMin" type="number" min="1" max="120" value="5" />
+          </div>
+          <div class="field">
+            <label>最多重启次数（0=不限）</label>
+            <input id="autoRestartMaxAttempts" type="number" min="0" max="100" value="5" />
+          </div>
+        </div>
+        <div class="row">
+          <button id="btnSaveRetry" class="btn btn-primary">保存重启设置</button>
+        </div>
+        <p class="test-result">重启会从断点继续，已评论/回复/私信的内容不会重复执行；等待重启期间也可以手动「继续执行」。关闭后任务中断只会在任务列表提示，不再自动重启。</p>
       </div>
     </section>
   </main>

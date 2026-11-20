@@ -3,7 +3,7 @@
 
 const DEFAULT_SETTINGS = {
   baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
-  // 大模型 Key 不放默认值：请在「设置 → 模型与接口设置」中填写自己的 Key
+  // 大模型 Key 已内置，用户无需填写；如想覆盖，在「设置 → 模型与接口设置」中改成自己的 Key
   apiKey: '',
   model: 'qwen3.7-plus',
   // 关键词生成专用模型：默认用更强的旗舰（一次性重推理任务）；评论/回复仍用上面的 model
@@ -34,6 +34,10 @@ const DEFAULT_SETTINGS = {
   maxDMsPerNote: 1,
   dmDelayMin: 20,
   dmDelayMax: 45,
+  // 任务中断后自动重启：默认开启，按间隔从断点续跑（用户可在设置里关闭）
+  autoRestartInterrupted: true,
+  autoRestartDelayMin: 5,
+  autoRestartMaxAttempts: 5, // 单个任务最多自动重启次数，0 表示不限次数
   // 运行数据上报服务（看板：http://124.221.115.174/xhs-report/?key=...）
   reportUrl: 'http://124.221.115.174/xhs-report',
   reportKey: 'xhs-report-2026'
@@ -51,48 +55,9 @@ const MODEL_OPTIONS = [
   'glm-5.3'
 ];
 
-// 预置默认产品（首次安装时写入；后续版本新增的预置产品会自动合并进用户列表，不影响用户改动）
-const DEFAULT_PRODUCTS = [
-  {
-    id: 'p_contextbuddy',
-    name: 'ContextBuddy（上下文管家）',
-    description:
-      'ContextBuddy 是一款本地运行的免费桌面应用，把散落在浏览器、微信、电脑和手机端的上下文数据（浏览记录、聊天记录、AI 对话、操作记录等）统一归档到本地文件夹，形成个人专属的数据底座，方便后续跨端同步、上下文管理和分享给 WorkBuddy 等第三方应用。主打隐私安全、数据自有，当前以本地保存为主，后续再做跨端同步与企业端能力。',
-    selected: true
-  },
-  {
-    id: 'p_hashliuguang',
-    name: '哈希流光（福州AI上门落地服务）',
-    description:
-      '哈希流光是福州鼓楼区一家本地AI服务公司（成立于2025年），官网 https://www.shiflowmind.cloud 。' +
-      '采用FDE（Forward Deployed Engineer，前沿部署工程师）模式，工程师上门到企业现场交付服务：' +
-      '1）一次免费的AI上门培训，帮福州本地企业把AI引入业务系统、降本增效；' +
-      '2）AI工具与技能实训，手把手教团队用AI绘图、图片生成、视频制作、AI营销与精准获客，以及Claude、OpenAI、Midjourney等工具；' +
-      '3）软件定制开发与长期技术支持，包括智能体（AI Agent）构建、企业内部AI Coding指导、代码维护，复杂项目可派驻场工程师。' +
-      '团队成员多为985/211毕业、有10到20年大厂工作经验，已有3年以上AI落地经验，服务过福州财税、电商、教育等本地企业。' +
-      '目标客户：福州本地想用AI降本增效、但不知道从何入手的中小企业、小团队和老板；' +
-      '另一类重要客户：自带B端客户资源、想找技术合伙人或开发搭档一起做软件项目的人（如找人合伙开发APP、财务软件、小程序、系统集成），他们有单子缺技术执行力，哈希流光可以当他们的技术后端（软件定制开发、驻场工程师），也可以合作分成——这类"寻项目合伙人/找程序员/找技术搭档"的笔记要主动去评论接触。' +
-      '推广目标：让对AI落地感兴趣的人访问官网 https://www.shiflowmind.cloud 了解服务并预约免费上门培训；' +
-      '写评论和回复时可以自然地提到官网域名 shiflowmind.cloud 引导别人去看（不要带 http:// 或 https:// 前缀，不要贴成超链接）。',
-    selected: true
-  },
-  {
-    id: 'p_hermes',
-    name: 'Hermes Agent 企业私有化部署服务',
-    description:
-      'Hermes Agent 是 Nous Research 开源的自进化 AI 智能体（MIT 协议，GitHub 仓库 NousResearch/hermes-agent）。' +
-      '核心能力：1）闭环学习——干完复杂任务自动沉淀成技能，技能在使用中持续自我改进，跨会话记忆、过往对话可搜索，越用越懂你；' +
-      '2）多平台消息网关——一个进程同时接入 Telegram、Discord、Slack、WhatsApp、Signal、飞书和终端，在哪聊都在线；' +
-      '3）300+ 大模型无锁定切换（Nous Portal、OpenRouter、GLM、Kimi、MiniMax、Ollama 等），一条命令换模型，不绑死任何一家；' +
-      '4）定时自动化——自然语言描述任务，无人值守定时跑，日报、备份、巡检自动投递；' +
-      '5）子代理并行委派、MCP 协议扩展、40+ 内置工具（网页搜索、图像生成、TTS、云浏览器、飞书文档、GitHub 等）；' +
-      '6）六种运行后端（本地、Docker、SSH、Daytona、Modal），$5 的 VPS 就能跑，也能扩展到 GPU 集群。' +
-      '我们基于深度定制版提供私有化部署服务：Docker 镜像一键/批量部署、Dashboard 可视化管理、企业认证与权限管控、内网离线环境交付、Ansible 多机批量部署、容器出站白名单与技能只读保护，支持 x86 + Ubuntu/CentOS。' +
-      '目标客户：想把 AI 智能体落地到业务里但缺部署能力的企业和团队；因数据安全要求必须内网/私有化部署的单位；想体验自进化 Agent 的开发者和极客。' +
-      '推广目标：让对私有化 AI 智能体感兴趣的人主动私信联系，进一步沟通需求；评论/回复/私信中不贴任何链接、不提任何域名、不说价格，靠分享真实落地经验吸引对方私聊。',
-    selected: true
-  }
-];
+// 产品为账号级数据，不再内置预置：每个手机号的产品库以服务端为准，
+// 登录时从服务端拉取（换浏览器/换电脑登录也能拿到自己的产品；服务端没有则为空）
+const DEFAULT_PRODUCTS = [];
 
 // ===== 运行时状态 =====
 const task = {
@@ -114,9 +79,14 @@ try {
 // 当前任务在「任务列表」中的记录：运行中随进度实时更新，暂停/停止/完成时写终态
 let currentRecord = null;
 
+// 待自动重启的任务：{taskId, nextAt}（存储键 pendingTaskRetry 的内存镜像，声明提前避免时序问题）
+let pendingRetry = null;
+
 // SW 启动兜底：把存储里残留的 running/paused 记录标记为 interrupted
 // （SW 重启时内存必无运行任务，这些记录只可能是被电脑关机/SW 回收打断的）
 reconcileInterruptedTasks().catch(() => { /* 忽略 */ });
+// 恢复待自动重启状态（供任务列表显示重启倒计时；alarm 由浏览器持久化，到点自会触发）
+loadPendingRetry().catch(() => { /* 忽略 */ });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const rnd = (min, max) => min + Math.random() * (max - min);
@@ -134,23 +104,61 @@ async function storageSet(obj) {
   try { await chrome.storage.local.set(obj); } catch (e) { /* ignore */ }
 }
 
+// ===== 按手机号隔离的用户数据 =====
+// 产品/设置/优质关键词库按 <按键>_<手机号> 存储：同一浏览器换手机号登录，互不看到对方的数据。
+// 未登录时仍用旧的全局键（登录前也能配置）；登录切换时把旧全局数据一次性迁给原手机号。
+const PHONE_SCOPED_KEYS = ['products', 'settings', 'qualityKeywords'];
+
+// 取当前登录手机号对应的存储键；顺手把残留的旧全局键迁移过来（未登录则原样返回全局键）
+async function scopedKey(base) {
+  const auth = await getAuth();
+  if (!auth || !auth.phone) return base;
+  const scoped = base + '_' + auth.phone;
+  const [s, g] = await Promise.all([
+    chrome.storage.local.get(scoped),
+    chrome.storage.local.get(base)
+  ]);
+  if (s[scoped] === undefined && g[base] !== undefined) {
+    await chrome.storage.local.set({ [scoped]: g[base] });
+    log('info', `旧版「${base}」数据已归属到手机号 ${auth.phone}`);
+  }
+  return scoped;
+}
+
+// 登录切换前调用：把旧版全局键数据迁给「原登录手机号」（从未登录过则归给新手机号），
+// 然后删掉全局键，防止未登录状态或新手机号读到上一个账号的数据
+async function migrateLegacyUserData(newPhone) {
+  const cur = await getAuth();
+  const owner = (cur && cur.phone) || newPhone;
+  if (!owner) return;
+  for (const base of PHONE_SCOPED_KEYS) {
+    const g = await chrome.storage.local.get(base);
+    if (g[base] === undefined) continue;
+    const scoped = base + '_' + owner;
+    const s = await chrome.storage.local.get(scoped);
+    if (s[scoped] === undefined) {
+      await chrome.storage.local.set({ [scoped]: g[base] });
+      log('info', `旧版「${base}」数据已归属到手机号 ${owner}`);
+    }
+    await chrome.storage.local.remove(base);
+  }
+}
+
 async function getSettings() {
-  const s = await storageGet('settings', {});
-  return { ...DEFAULT_SETTINGS, ...s };
+  const s = await storageGet(await scopedKey('settings'), {});
+  const merged = { ...DEFAULT_SETTINGS, ...s };
+  // 内置 Key 兜底：历史设置里 apiKey 为空（如按手机号隔离前保存的空值）时回退到内置 Key
+  if (!merged.apiKey) merged.apiKey = DEFAULT_SETTINGS.apiKey;
+  return merged;
 }
 async function saveSettings(s) {
-  await storageSet({ settings: { ...DEFAULT_SETTINGS, ...s } });
+  await storageSet({ [await scopedKey('settings')]: { ...DEFAULT_SETTINGS, ...s } });
 }
 async function getProducts() {
-  const stored = (await storageGet('products', [])) || [];
-  if (!stored.length) return DEFAULT_PRODUCTS;
-  // 合并预置产品：新版本新增的默认产品自动补齐，用户已增删改的产品保持不动
-  const ids = new Set(stored.map((p) => p.id));
-  const missing = DEFAULT_PRODUCTS.filter((p) => !ids.has(p.id));
-  return missing.length ? stored.concat(missing) : stored;
+  return (await storageGet(await scopedKey('products'), [])) || [];
 }
 async function saveProducts(p) {
-  await storageSet({ products: p || [] });
+  await storageSet({ [await scopedKey('products')]: p || [] });
 }
 // 关键词统一规范为 {text, productId, productName}：带产品归属，任务按产品分组执行
 // 兼容旧数据（历史上存的是纯字符串数组）
@@ -173,22 +181,24 @@ async function saveKeywords(k) {
 
 // ===== 优质关键词库（每个产品的固定词库，任务只从这里取词）=====
 // 与旧版 keywords 分开存储：库是人工筛选沉淀的结果，增删即时生效
+// 按手机号隔离：换账号登录后只会看到自己账号的优质库
 async function getQualityKeywords() {
-  return normalizeKeywords(await storageGet('qualityKeywords', []));
+  return normalizeKeywords(await storageGet(await scopedKey('qualityKeywords'), []));
 }
 async function saveQualityKeywords(k) {
-  await storageSet({ qualityKeywords: k || [] });
+  await storageSet({ [await scopedKey('qualityKeywords')]: k || [] });
 }
 // 首次读取：把旧版关键词整体迁入优质库（历史数据不丢），只迁移一次
 async function ensureQualityKeywords() {
-  const stored = await chrome.storage.local.get('qualityKeywords');
-  if (stored.qualityKeywords === undefined) {
+  const key = await scopedKey('qualityKeywords');
+  const stored = await chrome.storage.local.get(key);
+  if (stored[key] === undefined) {
     const legacy = await getKeywords();
     await saveQualityKeywords(legacy);
     if (legacy.length) log('info', `已将原有 ${legacy.length} 个关键词迁入优质关键词库`);
     return legacy;
   }
-  return normalizeKeywords(stored.qualityKeywords);
+  return normalizeKeywords(stored[key]);
 }
 
 // ===== 任务历史记录（任务列表 + 断点续跑）=====
@@ -218,7 +228,9 @@ function taskSummary(r) {
     keywordCount: (params.keywords || []).length,
     phone: params.phone || '',
     progress: r.progress || null,
-    stats: r.stats || null
+    stats: r.stats || null,
+    autoRestartCount: r.autoRestartCount || 0,
+    retryNextAt: pendingRetry && pendingRetry.taskId === r.id ? pendingRetry.nextAt : null
   };
 }
 async function getTaskSummaries() {
@@ -248,23 +260,100 @@ async function reconcileInterruptedTasks() {
   const list = await getTaskHistory();
   let changed = false;
   const now = Date.now();
+  const marked = [];
   for (const r of list) {
     if (task.running && currentRecord && r.id === currentRecord.id) continue;
     if (r.status === 'running' || r.status === 'paused') {
       r.status = 'interrupted';
       r.endedAt = r.endedAt || now;
+      marked.push(r);
       changed = true;
     }
   }
   if (changed) await saveTaskHistory(list);
+  // 被关机/SW 回收打断的任务：按设置间隔自动从断点重启
+  for (const r of marked) {
+    await scheduleAutoRestart(r, '浏览器/后台被系统回收，任务中断');
+  }
   return list;
+}
+
+// ===== 任务中断自动重启 =====
+// 任务异常或被系统回收中断后，用 chrome.alarms 定时把任务从断点续跑起来。
+// pendingTaskRetry（存储键）：{taskId, nextAt}；内存镜像 pendingRetry 供任务摘要实时显示
+// 重启次数记在任务记录的 autoRestartCount 上（随记录持久化，SW 重启不丢失）
+async function loadPendingRetry() {
+  pendingRetry = (await storageGet('pendingTaskRetry', null)) || null;
+  return pendingRetry;
+}
+async function clearPendingRetry() {
+  pendingRetry = null;
+  await storageSet({ pendingTaskRetry: null });
+  try { await chrome.alarms.clear('taskRetry'); } catch (e) { /* ignore */ }
+}
+// 安排一次自动重启。rec 为刚中断的任务记录，reason 仅用于日志
+async function scheduleAutoRestart(rec, reason) {
+  if (!rec || task.running) return;
+  const settings = await getSettings();
+  if (!settings.autoRestartInterrupted) {
+    if (!rec.autoRestartOffLogged) {
+      rec.autoRestartOffLogged = true;
+      log('info', `任务已中断（${reason}）。自动重启已关闭，请在任务列表手动「继续执行」`);
+      await persistTaskRecord(rec);
+    }
+    return;
+  }
+  const max = settings.autoRestartMaxAttempts;
+  if (max > 0 && (rec.autoRestartCount || 0) >= max) {
+    if (!rec.autoRestartCapped) {
+      rec.autoRestartCapped = true;
+      log('warn', `任务自动重启次数已达上限（${max} 次），不再自动重启，请手动「继续执行」或检查网络/登录状态`);
+      await persistTaskRecord(rec);
+    }
+    return;
+  }
+  rec.autoRestartCount = (rec.autoRestartCount || 0) + 1;
+  const delayMin = Math.max(1, Math.round(settings.autoRestartDelayMin || 5));
+  const nextAt = Date.now() + delayMin * 60000;
+  pendingRetry = { taskId: rec.id, nextAt };
+  await storageSet({ pendingTaskRetry: pendingRetry });
+  chrome.alarms.create('taskRetry', { when: nextAt });
+  log('warn', `任务中断（${reason}），${delayMin} 分钟后自动从断点重启（第 ${rec.autoRestartCount} 次` +
+    (max > 0 ? `，上限 ${max} 次` : '，不限次数') + '）。可在「设置」关闭自动重启');
+  await persistTaskRecord(rec); // 计数落库并广播，面板任务列表显示重启信息
+}
+// 到点执行：从断点续跑（与面板「继续执行」同一套 runTask 续跑参数）
+async function handleRetryAlarm() {
+  const pending = pendingRetry || (await loadPendingRetry());
+  if (!pending) return;
+  await clearPendingRetry(); // 先消费，防止重复触发
+  if (task.running) { log('info', '自动重启跳过：已有任务正在运行'); return; }
+  const rec = (await getTaskHistory()).find((r) => r.id === pending.taskId);
+  if (!rec) return;
+  if (rec.status === 'running' || rec.status === 'completed' || rec.status === 'stopped') return;
+  const auth = await getAuth();
+  if (!auth || !auth.phone) {
+    log('warn', '自动重启已取消：未登录，请登录后手动「继续执行」');
+    return;
+  }
+  log('info', `自动重启任务（第 ${rec.autoRestartCount || 1} 次），从断点继续执行`);
+  runTask({
+    record: rec,
+    resume: {
+      cursor: rec.cursor || { gi: 0, ki: 0, doneNoteIds: [] },
+      progress: rec.progress || null,
+      stats: rec.stats || null,
+      reportRunId: rec.reportRunId || null
+    },
+    phone: auth.phone
+  });
 }
 
 // ===== 手机号 + 验证码登录（参考 ContextBuddy auth_service.py）=====
 // 阿里云短信 Dysmsapi 2017-05-25 SendSms（RPC 签名 V1，HMAC-SHA1）
 const SMS_CONFIG = {
-  accessKeyId: 'YOUR_ACCESS_KEY_ID',
-  accessKeySecret: 'YOUR_ACCESS_KEY_SECRET',
+  accessKeyId: '<阿里云 AccessKeyId，已脱敏：本地版填真实值>',
+  accessKeySecret: '<阿里云 AccessKeySecret，已脱敏：本地版填真实值>',
   signName: '哈希流光',
   templateCode: 'SMS_495955218'
 };
@@ -395,12 +484,25 @@ async function loginWithCode(phone, code) {
   if (code !== rec.code) return { ok: false, error: '验证码不正确' };
   delete store[phone];
   await chrome.storage.session.set({ smsCodes: store });
+  // 切换登录态前，先把旧版全局数据归属到原登录手机号（从未登录过则归给本次新号），
+  // 避免换手机号登录后看到上一个人的产品/设置/关键词库
+  await migrateLegacyUserData(phone);
   const auth = {
     phone,
     loggedInAt: new Date().toLocaleString('zh-CN', { hour12: false })
   };
   await saveAuth(auth);
   log('success', `手机号 ${phone} 登录成功，本客户端将以该手机号标识`);
+  // 产品以服务端为准：拉取该手机号的产品库（服务端没有则本地置空；拉取失败保留本地）
+  const remote = await pullProductsFromServer(phone);
+  if (remote) {
+    await saveProducts(remote);
+    log('info', remote.length
+      ? `已从服务端加载 ${remote.length} 个产品`
+      : '该手机号在服务端暂无产品，本地产品库已置空');
+  } else {
+    log('warn', '服务端产品拉取失败，暂时使用本地产品库');
+  }
   // 上报登录事件（服务端看板按手机号标识客户端）
   reportEvent('login', { phone, client: 'chrome-extension' });
   // 登录后同步一次产品信息，服务端即拥有该客户端当前的产品清单
@@ -415,6 +517,32 @@ async function loginWithCode(phone, code) {
     }))
   });
   return { ok: true, phone };
+}
+
+// 从服务端拉取指定手机号的产品库（登录后同步用）；失败返回 null（保留本地数据不动）
+async function pullProductsFromServer(phone) {
+  try {
+    const settings = await getSettings();
+    const base = (settings.reportUrl || '').replace(/\/+$/, '');
+    if (!base) return null;
+    const res = await fetch(base + '/api/products?phone=' + encodeURIComponent(phone), {
+      headers: { 'X-Api-Key': settings.reportKey || '' },
+      signal: AbortSignal.timeout(8000)
+    });
+    if (!res.ok) return null;
+    const data = await res.json().catch(() => null);
+    if (!data || data.ok !== true || !Array.isArray(data.products)) return null;
+    return data.products
+      .filter((p) => p && p.id && p.name)
+      .map((p) => ({
+        id: String(p.id),
+        name: String(p.name),
+        description: String(p.description || ''),
+        selected: !!p.selected
+      }));
+  } catch (e) {
+    return null;
+  }
 }
 
 // ===== 运行数据上报（服务端看板）=====
@@ -480,6 +608,10 @@ function broadcastState() {
 // ===== LLM 调用 =====
 async function callLLM(messages, opts = {}) {
   const settings = await getSettings();
+  if (!settings.apiKey) {
+    // 没配 Key 时直接给明确提示：设置按手机号隔离，每个手机号需各自配置
+    throw new Error('未配置 LLM API Key，请先在「设置 → 模型与接口设置」中填写');
+  }
   const base = (settings.baseUrl || DEFAULT_SETTINGS.baseUrl).replace(/\/+$/, '');
   const url = base + '/chat/completions';
   const body = {
@@ -947,6 +1079,8 @@ async function runTask(cfg) {
     };
   }
   task.recordId = currentRecord.id;
+  // 任务已在跑：取消之前安排的自动重启（重试已失去意义，再次中断会重新安排）
+  await clearPendingRetry();
 
   // 断点失效保护：产品/关键词被删、每产品关键词上限调小导致组数不足时不能硬跑
   if (isResume && (startGi >= groups.length || startKi >= (groups[startGi].keywords || []).length)) {
@@ -1382,17 +1516,23 @@ async function runTask(cfg) {
       });
     }
     // 任务列表终态：用户停止→stopped；运行异常→interrupted；正常跑完→completed
+    // 注意：先清运行标志再安排自动重启，否则 scheduleAutoRestart 的「任务在跑」守卫会把它挡掉
+    task.running = false;
+    task.paused = false;
+    task.recordId = null;
     if (currentRecord) {
+      const interruptedByError = !task.stopRequested && !!taskError;
       currentRecord.status = task.stopRequested ? 'stopped' : (taskError ? 'interrupted' : 'completed');
       currentRecord.endedAt = Date.now();
       currentRecord.progress = { ...task.progress };
       syncStats();
       await persistTaskRecord(currentRecord);
+      // 异常中断：按设置间隔安排自动重启（从本次落库的断点续跑）
+      if (interruptedByError) {
+        await scheduleAutoRestart(currentRecord, (taskError && taskError.message) || '任务异常');
+      }
       currentRecord = null;
     }
-    task.running = false;
-    task.paused = false;
-    task.recordId = null;
     broadcastState();
   }
 }
@@ -1422,8 +1562,12 @@ function buildProductGroups(products, keywords, maxPerProduct) {
 
 // ===== 保活：定时心跳，避免长时间任务中 service worker 被回收 =====
 chrome.alarms.create('keepalive', { periodInMinutes: 0.5 });
-chrome.alarms.onAlarm.addListener(() => {
-  if (task.running) broadcastState();
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === 'keepalive') {
+    if (task.running) broadcastState();
+  } else if (alarm.name === 'taskRetry') {
+    handleRetryAlarm().catch((e) => log('error', '自动重启执行失败：' + e.message));
+  }
 });
 
 // ===== 消息处理 =====
@@ -1469,6 +1613,11 @@ async function handleMessage(msg, sender) {
       };
     case 'SAVE_SETTINGS':
       await saveSettings(msg.settings);
+      // 用户关闭自动重启：取消已安排的重启
+      if (msg.settings && msg.settings.autoRestartInterrupted === false) {
+        await clearPendingRetry();
+        log('info', '已关闭任务中断自动重启，待重启的任务已取消');
+      }
       log('info', '设置已保存');
       return { ok: true };
     case 'SAVE_PRODUCTS':
@@ -1618,6 +1767,8 @@ async function handleMessage(msg, sender) {
       }
       const list = (await getTaskHistory()).filter((r) => r.id !== msg.taskId);
       await saveTaskHistory(list);
+      // 删掉的正是待自动重启的任务：取消重启
+      if (pendingRetry && pendingRetry.taskId === msg.taskId) await clearPendingRetry();
       const tasks = list.map(taskSummary);
       broadcast({ type: 'tasks', tasks });
       return { ok: true, tasks };
@@ -1628,6 +1779,8 @@ async function handleMessage(msg, sender) {
         (r) => task.running && currentRecord && r.id === currentRecord.id
       );
       await saveTaskHistory(list);
+      // 待重启的任务记录被清掉：取消重启
+      if (pendingRetry && !list.some((r) => r.id === pendingRetry.taskId)) await clearPendingRetry();
       const tasks = list.map(taskSummary);
       broadcast({ type: 'tasks', tasks });
       log('info', '已清空结束的任务记录');
@@ -1659,6 +1812,8 @@ async function handleMessage(msg, sender) {
     case 'LOGIN':
       return await loginWithCode(msg.phone, msg.code);
     case 'LOGOUT':
+      // 退出前把残留的旧版全局数据归属到当前手机号，避免下个账号登录时捡到别人的数据
+      await migrateLegacyUserData(null);
       await clearAuth();
       log('info', '已退出登录');
       return { ok: true };
@@ -1683,9 +1838,7 @@ chrome.runtime.onConnect.addListener((port) => {
 // ===== 安装初始化 =====
 chrome.runtime.onInstalled.addListener(async () => {
   await saveSettings(await getSettings()); // 保证默认值写入
-  // 首次安装时预置默认产品
-  const existing = await storageGet('products', null);
-  if (existing == null) await saveProducts(DEFAULT_PRODUCTS);
+  // 产品不再预置：每个手机号的产品库在登录时从服务端拉取
   try {
     await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
   } catch (e) { /* 旧版本忽略 */ }

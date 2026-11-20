@@ -67,6 +67,25 @@ async function refreshState() {
   renderTaskList();
   renderLogs(resp.logs || []);
 }
+
+// 登录/退出后重新拉取：产品、设置、优质关键词库都按手机号隔离，切换账号后必须刷新，
+// 否则界面还显示着上一个账号的数据（要等重开面板才会变）
+async function reloadUserData() {
+  const resp = await send({ type: 'GET_STATE' });
+  if (!resp || !resp.ok) return;
+  state.settings = resp.settings || {};
+  state.products = resp.products || [];
+  state.qualityKeywords = resp.qualityKeywords || [];
+  state.auth = resp.auth || null;
+  applyAuthUI();
+  try {
+    renderProducts();
+    fillSettingsForm();
+    renderKeywordGroups();
+  } catch (e) {
+    console.error('刷新用户数据失败：', e);
+  }
+}
 connectPanel();
 
 // ===== 日志 =====
@@ -215,6 +234,19 @@ function buildTaskItem(t) {
     ' · 已私信 ' + (p.dms || 0);
   item.appendChild(prog);
 
+  // 自动重启信息：中断任务显示已重启次数与下次重启倒计时
+  if (t.status === 'interrupted' && (t.autoRestartCount || t.retryNextAt)) {
+    const hint = document.createElement('div');
+    hint.className = 'task-retry';
+    let txt = '已自动重启 ' + (t.autoRestartCount || 0) + ' 次';
+    if (t.retryNextAt) {
+      const left = Math.max(1, Math.ceil((t.retryNextAt - Date.now()) / 60000));
+      txt += ' · 约 ' + left + ' 分钟后再次重启';
+    }
+    hint.textContent = txt;
+    item.appendChild(hint);
+  }
+
   // 操作按钮：运行中只提示；可续跑的给「继续执行」；完成的给「重新执行」
   const actions = document.createElement('div');
   actions.className = 'task-actions';
@@ -237,6 +269,10 @@ function buildTaskItem(t) {
 }
 // 任务列表按钮统一事件委托（列表会随广播频繁重渲，避免逐按钮绑定）
 function bindTaskList() {
+  // 有待重启的任务时，每 30 秒刷新列表，让「约 N 分钟后再次重启」倒计时走动
+  setInterval(() => {
+    if ((state.tasks || []).some((t) => t.retryNextAt && t.retryNextAt > Date.now())) renderTaskList();
+  }, 30000);
   $('taskList').addEventListener('click', async (e) => {
     const btn = e.target.closest('button[data-act]');
     if (!btn) return;
@@ -358,6 +394,9 @@ function fillSettingsForm() {
   $('maxDMsPerNote').value = s.maxDMsPerNote != null ? s.maxDMsPerNote : 1;
   $('dmDelayMin').value = s.dmDelayMin != null ? s.dmDelayMin : 20;
   $('dmDelayMax').value = s.dmDelayMax != null ? s.dmDelayMax : 45;
+  $('autoRestartInterrupted').checked = s.autoRestartInterrupted !== false;
+  $('autoRestartDelayMin').value = s.autoRestartDelayMin != null ? s.autoRestartDelayMin : 5;
+  $('autoRestartMaxAttempts').value = s.autoRestartMaxAttempts != null ? s.autoRestartMaxAttempts : 5;
 
   const modelSel = $('model');
   modelSel.innerHTML = '';
@@ -412,7 +451,10 @@ function collectSettingsForm() {
     enablePrivateMessage: $('enablePrivateMessage').checked,
     maxDMsPerNote: num('maxDMsPerNote'),
     dmDelayMin: num('dmDelayMin'),
-    dmDelayMax: num('dmDelayMax')
+    dmDelayMax: num('dmDelayMax'),
+    autoRestartInterrupted: $('autoRestartInterrupted').checked,
+    autoRestartDelayMin: num('autoRestartDelayMin'),
+    autoRestartMaxAttempts: num('autoRestartMaxAttempts')
   };
 }
 
@@ -478,6 +520,7 @@ function bindLoginEvents() {
       setLoginMsg('', false);
       $('loginCode').value = '';
       applyAuthUI();
+      await reloadUserData(); // 拉取该手机号名下的产品/设置/关键词库
       flash('登录成功', true);
     } else {
       setLoginMsg(r.error || '登录失败', false);
@@ -488,6 +531,7 @@ function bindLoginEvents() {
     await send({ type: 'LOGOUT' });
     state.auth = null;
     applyAuthUI();
+    await reloadUserData(); // 退出后回到未登录的默认数据视图
     flash('已退出登录', true);
   });
 }
@@ -815,21 +859,33 @@ function bindEvents() {
   $('btnGenKeywords').addEventListener('click', async () => {
     const products = collectProductsFromDOM().filter((p) => p.selected && p.name);
     if (!products.length) return flash('请先在「产品」页勾选并填写产品', false);
-    $('btnGenKeywords').disabled = true;
-    const r = await send({ type: 'GENERATE_KEYWORDS', products });
-    $('btnGenKeywords').disabled = false;
-    if (r.ok && r.keywords && r.keywords.length) {
-      // 候选词整体替换：按产品归组展示，默认全选，等用户勾选后移入优质库
-      state.candidates = r.keywords.map((k) => ({
-        text: k.text,
-        productId: k.productId,
-        productName: k.productName,
-        selected: true
-      }));
-      renderKeywordGroups();
-      flash(`已生成 ${r.keywords.length} 个候选词（${products.length > 1 ? '按产品分别生成' : '单个产品'}），勾选后「移入优质库」`, true);
-    } else {
-      flash('生成失败：' + (r.error || '未知'), false);
+    const btn = $('btnGenKeywords');
+    btn.disabled = true;
+    // 生成中是单次/多次 LLM 调用，无真实进度：用按钮文字 + 已等待秒数告诉用户还在跑
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      btn.textContent = 'AI 生成中… 已等待 ' + Math.floor((Date.now() - startedAt) / 1000) + ' 秒';
+    }, 1000);
+    btn.textContent = 'AI 生成中… 已等待 0 秒';
+    try {
+      const r = await send({ type: 'GENERATE_KEYWORDS', products });
+      if (r.ok && r.keywords && r.keywords.length) {
+        // 候选词整体替换：按产品归组展示，默认全选，等用户勾选后移入优质库
+        state.candidates = r.keywords.map((k) => ({
+          text: k.text,
+          productId: k.productId,
+          productName: k.productName,
+          selected: true
+        }));
+        renderKeywordGroups();
+        flash(`已生成 ${r.keywords.length} 个候选词（${products.length > 1 ? '按产品分别生成' : '单个产品'}），勾选后「移入优质库」`, true);
+      } else {
+        flash('生成失败：' + (r.error || '未知'), false);
+      }
+    } finally {
+      clearInterval(timer);
+      btn.textContent = 'AI 生成关键词（基于所选产品）';
+      btn.disabled = false;
     }
   });
   // 分组区点击：AI 生成 / 删除库词 / 候选词移入与丢弃 / 手动添加
@@ -843,14 +899,23 @@ function bindEvents() {
       const product = collectProductsFromDOM().find((p) => p.id === genBtn.dataset.genFor);
       if (!product || !product.name) return flash('请先填写该产品名称', false);
       genBtn.disabled = true;
-      const r = await send({ type: 'GENERATE_KEYWORDS', products: [product] });
-      genBtn.disabled = false;
-      if (r.ok && r.keywords && r.keywords.length) {
-        setCandidatesForProduct(product.id, r.keywords);
-        renderKeywordGroups();
-        flash(`已为「${product.name}」生成 ${r.keywords.length} 个候选词，勾选后「移入优质库」`, true);
-      } else {
-        flash('生成失败：' + (r.error || '未知'), false);
+      // 生成中通过按钮文字 + 已等待秒数提示（单产品生成，无真实进度）
+      const startedAt = Date.now();
+      const timer = setInterval(() => {
+        genBtn.textContent = '生成中… ' + Math.floor((Date.now() - startedAt) / 1000) + ' 秒';
+      }, 1000);
+      genBtn.textContent = '生成中… 0 秒';
+      try {
+        const r = await send({ type: 'GENERATE_KEYWORDS', products: [product] });
+        if (r.ok && r.keywords && r.keywords.length) {
+          setCandidatesForProduct(product.id, r.keywords);
+          flash(`已为「${product.name}」生成 ${r.keywords.length} 个候选词，勾选后「移入优质库」`, true);
+        } else {
+          flash('生成失败：' + (r.error || '未知'), false);
+        }
+      } finally {
+        clearInterval(timer);
+        renderKeywordGroups(); // 重绘恢复按钮原文并刷新候选词展示
       }
       return;
     }
@@ -924,7 +989,9 @@ function bindEvents() {
   // 设置
   $('btnToggleKey').addEventListener('click', () => {
     const el = $('apiKey');
-    el.type = el.type === 'password' ? 'text' : 'password';
+    const show = el.type === 'password';
+    el.type = show ? 'text' : 'password';
+    $('btnToggleKey').textContent = show ? '隐藏' : '显示';
   });
   $('btnSaveSettings').addEventListener('click', async () => {
     const r = await send({ type: 'SAVE_SETTINGS', settings: collectSettingsForm() });
@@ -963,6 +1030,11 @@ function bindEvents() {
   $('btnClearDm').addEventListener('click', async () => {
     const r = await send({ type: 'CLEAR_DM' });
     flash(r.ok ? '已清空私信记录' : '操作失败', r.ok);
+  });
+  $('btnSaveRetry').addEventListener('click', async () => {
+    const r = await send({ type: 'SAVE_SETTINGS', settings: collectSettingsForm() });
+    state.settings = collectSettingsForm();
+    flash(r.ok ? '重启设置已保存' : ('保存失败：' + r.error), r.ok);
   });
 }
 

@@ -177,6 +177,33 @@ def report_product_sync(data: ProductSyncReport):
         conn.close()
     return {'ok': True, 'synced': len(keep_ids)}
 
+@app.get('/api/products', dependencies=[Depends(check_api_key)])
+def get_products(phone: str = Query(...)):
+    """按手机号拉取产品库：插件登录后调用，产品以服务端为准同步到本地。"""
+    phone = phone.strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail='phone required')
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                'SELECT product_id, name, description, selected, updated_at '
+                'FROM products WHERE phone = %s ORDER BY updated_at DESC, id DESC',
+                (phone,),
+            )
+            products = [
+                {
+                    'id': row['product_id'],
+                    'name': row['name'] or '',
+                    'description': row['description'] or '',
+                    'selected': bool(row['selected']),
+                }
+                for row in cur.fetchall()
+            ]
+    finally:
+        conn.close()
+    return {'ok': True, 'phone': phone, 'products': products}
+
 
 @app.post('/api/report/login', dependencies=[Depends(check_api_key)])
 def report_login(data: LoginReport):

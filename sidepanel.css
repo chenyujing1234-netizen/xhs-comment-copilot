@@ -169,6 +169,9 @@ body.not-logged #btnStop { display: none; }
   font-family: inherit;
 }
 .field textarea { resize: vertical; }
+.apikey-row { display: flex; gap: 8px; align-items: center; }
+.apikey-row input { flex: 1; min-width: 0; }
+.apikey-row .btn-small { flex-shrink: 0; }
 .field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .checkbox { display: flex; align-items: center; gap: 6px; }
 .checkbox input { width: auto; }
@@ -253,6 +256,7 @@ body.not-logged #btnStop { display: none; }
 .task-item .t-time { font-size: 12px; color: var(--muted); }
 .task-meta { font-size: 12px; color: var(--muted); margin-bottom: 4px; word-break: break-all; }
 .task-progress { font-size: 13px; color: var(--text); margin-bottom: 8px; }
+.task-retry { font-size: 12px; color: var(--warn); margin-bottom: 8px; }
 .task-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .badge {
   display: inline-block;
