@@ -574,3 +574,10 @@ def health():
 @app.get('/')
 def index():
     return FileResponse(os.path.join(BASE_DIR, 'dashboard.html'))
+
+
+@app.get('/privacy')
+@app.get('/privacy.html')
+def privacy():
+    # 商店上架要求的公开隐私政策（无需鉴权）
+    return FileResponse(os.path.join(BASE_DIR, 'privacy.html'))

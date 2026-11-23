@@ -11,3 +11,6 @@ venv/
 .trae-html-share-packages/
 node_modules/
 *.log
+
+# 商店提交包（内含内置密钥，严禁入库）
+*.zip
