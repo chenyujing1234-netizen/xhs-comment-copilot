@@ -736,18 +736,28 @@ async function generateKeywords(products) {
 }
 
 // ===== 评论生成 =====
-async function generateComment(product, info) {
+async function generateComment(product, info, withHook) {
   const settings = await getSettings();
   const sys =
     '你就是个普通小红书用户，刷到这条随手留一句。说人话，别端着。' +
+    '你的人设：踩过视频里这个坑、并且已经自己解决了的人。' +
+    '你的评论要让刷到的人觉得"这人有路子"，想问他到底怎么弄的，但他偏又把话说一半。' +
     '绝不能像客服、营销号、AI，也不要"希望对你有帮助""值得一试"这种客套话，' +
-    '不要排比、不要总结、不要小作文、不要堆感叹号。' +
-    '目标：让别人觉得你踩过同样的坑，愿意回你一句或者来问你怎么办。';
+    '不要排比、不要总结、不要小作文、不要堆感叹号。';
 
   const comments = (info.comments || [])
     .slice(0, 6)
     .map((c) => `- ${c.name || '用户'}：${c.content}`)
     .join('\n');
+
+  // 钩子模式：共鸣 + 暗示解决 + 暗语引导；纯共鸣模式：共鸣 + 意犹未尽，不主动引导
+  // 两种模式交替出现，避免每条都带钩子，一看就是营销号
+  const hookRules = withHook
+    ? '1. 开头贴视频内容共鸣：针对视频里的具体问题吐槽或认同，别泛泛而谈；\n' +
+      '2. 中间暗示你自己已经解决了：比如"后来找对路子才好""抄了近道才搞定""靠个偏方弄好的"，方法绝不展开；\n' +
+      '3. 结尾留钩子但不把话说白：用"评论区不方便细说""在这说容易被夹""你懂的""戳我""思信""不好公开讲"这类说法勾别人来问，绝不能直接写"私我""加微信""免费送""+v"这种明文，且每次换一种说法，别重复；\n'
+    : '1. 开头贴视频内容共鸣：针对视频里的具体问题吐槽或认同，别泛泛而谈；\n' +
+      '2. 结尾意犹未尽：比如"后来弄好了""改对个地方才成"，不主动勾搭，但方法也别说透；\n';
 
   const user =
     '产品名称：' + product.name + '\n' +
@@ -757,12 +767,13 @@ async function generateComment(product, info) {
     '作者：' + (info.author || '(未知)') + '\n' +
     '部分已有评论：\n' + (comments || '(无)') + '\n\n' +
     '写一条极短的中文评论，' + settings.commentMinLen + '~' + settings.commentMaxLen + '字，像刷手机时随手打的。\n' +
-    '要求：\n' +
-    '1. 口语化，可以带语气词（啊/吧/了/真的/咋），可以省略主语；\n' +
-    '2. 一句话说完，最多一个标点；\n' +
-    '3. 像跟朋友吐槽或分享，别用书面语；\n' +
-    '4. 贴合视频内容，别硬提产品名，别提私我；不要贴超链接，但产品描述里明确给出官网域名的，可以自然带一句域名（如 shiflowmind.cloud），没给就不提；\n' +
-    '5. 只输出评论正文，不要引号、不要解释、不要换行。';
+    '写法（三句话融成一句）：\n' +
+    hookRules +
+    '其他要求：\n' +
+    'a. 口语化，可以带语气词（啊/吧/了/真的/咋），可以省略主语，最多一个标点；\n' +
+    'b. 贴合视频内容，别硬提产品名，别提私我；不要贴超链接，但产品描述里明确给出官网域名的，可以自然带一句域名（如 shiflowmind.cloud），没给就不提；\n' +
+    'c. 信息只说一半，解决方法永远不写出来——写出来就没钩子了；\n' +
+    'd. 只输出评论正文，不要引号、不要解释、不要换行。';
 
   const content = await callLLM(
     [
@@ -1262,7 +1273,8 @@ async function runTask(cfg) {
 
           let comment;
           try {
-            comment = await generateComment(product, info);
+            // 70% 带钩子（共鸣+暗示解决+暗语引导），30% 纯共鸣，交替出现更自然
+            comment = await generateComment(product, info, Math.random() < 0.7);
           } catch (e) {
             log('error', `评论生成失败：${e.message}`);
             continue;
