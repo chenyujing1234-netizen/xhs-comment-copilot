@@ -13,7 +13,7 @@
 | Chrome 商店图标 | `icons/icon128.png` | 128×128 |
 | Edge 商店 Logo | `icons/store-300.png` | 300×300 |
 | Chrome/Edge 截图（5 张内） | `screenshots/01-run.png` ~ `04-tasklist.png` | 1280×800 |
-| 隐私政策 URL | http://124.221.115.174/xhs-report/privacy | 公网可访问 |
+| 隐私政策 URL | https://linkpal.cloud/xhs-report/privacy | 公网可访问 |
 
 ## 2. 通用信息
 
@@ -46,7 +46,7 @@
 - **截图**：上传 screenshots/01-run.png、02-products.png、03-keywords.png、04-tasklist.png（顺序即展示顺序）
 - **图标**：上传 icons/icon128.png
 - **宣传图（可选）**：未制作，可跳过
-- **网站**（可选）：http://124.221.115.174/xhs-report/
+- **网站**（可选）：https://linkpal.cloud/xhs-report/
 - **支持邮箱**：填你的邮箱（与隐私政策一致）
 
 ### 隐私实践（Privacy practices）
@@ -64,7 +64,7 @@
   - 个人信息（手机号）：用于登录标识 → 用途：App functionality；不出售、不用于非应用目的
   - 网站内容（小红书视频页/评论区内容）：用于生成评论与识别感兴趣用户 → App functionality
   - 用户活动（任务事件、统计数据）：用于断点续跑与看板展示 → App functionality
-- **隐私政策 URL**：http://124.221.115.174/xhs-report/privacy
+- **隐私政策 URL**：https://linkpal.cloud/xhs-report/privacy
 
 ### 分发
 - 可见性：Public（公开）
@@ -78,7 +78,7 @@
 - **类别**：Productivity
 - **价格**：免费
 - **可见性**：公开
-- **隐私政策 URL**：http://124.221.115.174/xhs-report/privacy
+- **隐私政策 URL**：https://linkpal.cloud/xhs-report/privacy
 - **数据收集说明**（Edge 表单）：勾选/填写与 Chrome 相同的数据类别与用途
 - **描述**：用上面中文详细描述即可（Edge 无硬性字数上限，保留要点）
 

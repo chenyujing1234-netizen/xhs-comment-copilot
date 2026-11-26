@@ -105,3 +105,51 @@ CREATE TABLE IF NOT EXISTS login_logs (
   logged_in_at DATETIME NOT NULL,
   KEY idx_phone (phone)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 潜在客户：评论获客流程中被 AI 判为「感兴趣」的用户，按产品归属维护
+-- 同一 (手机号, 产品, 用户) 重复出现时 upsert 合并，不覆盖人工维护的 status / note
+CREATE TABLE IF NOT EXISTS leads (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  phone VARCHAR(20) NOT NULL,
+  product_name VARCHAR(128) NOT NULL DEFAULT '',
+  -- 去重键：优先 user_id，缺失时退化为 user_url（保证同一用户只产生一条记录）
+  user_key VARCHAR(300) NOT NULL DEFAULT '',
+  user_id VARCHAR(64) NOT NULL DEFAULT '',
+  user_name VARCHAR(64) NOT NULL DEFAULT '',
+  user_url VARCHAR(500) NOT NULL DEFAULT '',
+  note_id VARCHAR(64) NOT NULL DEFAULT '',
+  note_url VARCHAR(500) NOT NULL DEFAULT '',
+  note_title VARCHAR(255) NOT NULL DEFAULT '',
+  keyword VARCHAR(64) NOT NULL DEFAULT '',
+  comment_content VARCHAR(500) NOT NULL DEFAULT '',
+  interest_reason VARCHAR(500) NOT NULL DEFAULT '',
+  source VARCHAR(20) NOT NULL DEFAULT 'comment',
+  -- 已执行的触达动作（OR 合并，不会被后续上报清零）
+  replied TINYINT NOT NULL DEFAULT 0,
+  dmed TINYINT NOT NULL DEFAULT 0,
+  -- 人工维护的跟进状态 / 备注（插件上报不覆盖）
+  status VARCHAR(32) NOT NULL DEFAULT 'new',
+  note TEXT,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  UNIQUE KEY uk_phone_product_user (phone, product_name, user_key),
+  KEY idx_phone (phone),
+  KEY idx_product (product_name),
+  KEY idx_status (status),
+  KEY idx_updated (updated_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 动作流水：统一记录每个手机号的出站动作（评论/回复/私信/关注/分享），
+-- 用于「每日发送上限」计数。只统计成功（ok=1）的动作，避免失败消耗额度。
+-- 今日已发数 = COUNT(*) WHERE phone=? AND ok=1 AND created_at >= CURDATE()
+CREATE TABLE IF NOT EXISTS action_logs (
+  id BIGINT AUTO_INCREMENT PRIMARY KEY,
+  phone VARCHAR(20) NOT NULL,
+  action_type VARCHAR(20) NOT NULL,
+  note_id VARCHAR(64) NOT NULL DEFAULT '',
+  target_user_id VARCHAR(64) NOT NULL DEFAULT '',
+  ok TINYINT NOT NULL DEFAULT 1,
+  created_at DATETIME NOT NULL,
+  KEY idx_phone_date (phone, created_at),
+  KEY idx_type (action_type)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

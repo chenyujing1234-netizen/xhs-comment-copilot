@@ -4,7 +4,7 @@
 const DEFAULT_SETTINGS = {
   baseUrl: 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
   // 大模型 Key 已内置，用户无需填写；如想覆盖，在「设置 → 模型与接口设置」中改成自己的 Key
-  apiKey: '',
+  apiKey: 'sk-sp-H.DPDYXH.iDCC.MEUCICAjTrpMd_ZuS_v2fToFLu_NNBGrGKf-RPVVjCuU2POsAiEAtqncVYixW6t_74c1oeNUVMgHL1SO3RiigE8rzyIOcHQ',
   model: 'qwen3.7-plus',
   // 关键词生成专用模型：默认用更强的旗舰（一次性重推理任务）；评论/回复仍用上面的 model
   keywordModel: 'qwen4-max-preview',
@@ -38,8 +38,11 @@ const DEFAULT_SETTINGS = {
   autoRestartInterrupted: true,
   autoRestartDelayMin: 5,
   autoRestartMaxAttempts: 5, // 单个任务最多自动重启次数，0 表示不限次数
-  // 运行数据上报服务（看板：http://124.221.115.174/xhs-report/?key=...）
-  reportUrl: 'http://124.221.115.174/xhs-report',
+  // 账号安全：每个手机号每日出站动作（评论/回复/私信/关注/分享）总数上限，达到即停任务；0 表示不限制
+  dailyLimit: 50,
+  // 运行数据上报服务（看板：https://linkpal.cloud/xhs-report/?key=...）
+  // 必须用 HTTPS：Chrome 商店要求用户数据加密传输，明文 HTTP 会被拒（参考违规 Purple Copper）
+  reportUrl: 'https://linkpal.cloud/xhs-report',
   reportKey: 'xhs-report-2026'
 };
 
@@ -107,7 +110,7 @@ async function storageSet(obj) {
 // ===== 按手机号隔离的用户数据 =====
 // 产品/设置/优质关键词库按 <按键>_<手机号> 存储：同一浏览器换手机号登录，互不看到对方的数据。
 // 未登录时仍用旧的全局键（登录前也能配置）；登录切换时把旧全局数据一次性迁给原手机号。
-const PHONE_SCOPED_KEYS = ['products', 'settings', 'qualityKeywords'];
+const PHONE_SCOPED_KEYS = ['products', 'settings', 'qualityKeywords', 'promo', 'promoFollowed', 'promoShared'];
 
 // 取当前登录手机号对应的存储键；顺手把残留的旧全局键迁移过来（未登录则原样返回全局键）
 async function scopedKey(base) {
@@ -149,6 +152,10 @@ async function getSettings() {
   const merged = { ...DEFAULT_SETTINGS, ...s };
   // 内置 Key 兜底：历史设置里 apiKey 为空（如按手机号隔离前保存的空值）时回退到内置 Key
   if (!merged.apiKey) merged.apiKey = DEFAULT_SETTINGS.apiKey;
+  // 历史版本把上报地址存成裸 IP 明文 HTTP，统一迁移到 HTTPS 域名（安全 + 兼容 manifest 权限收敛）
+  if (merged.reportUrl && merged.reportUrl.indexOf('http://124.221.115.174') === 0) {
+    merged.reportUrl = merged.reportUrl.replace('http://124.221.115.174', 'https://linkpal.cloud');
+  }
   return merged;
 }
 async function saveSettings(s) {
@@ -352,8 +359,8 @@ async function handleRetryAlarm() {
 // ===== 手机号 + 验证码登录（参考 ContextBuddy auth_service.py）=====
 // 阿里云短信 Dysmsapi 2017-05-25 SendSms（RPC 签名 V1，HMAC-SHA1）
 const SMS_CONFIG = {
-  accessKeyId: '<阿里云 AccessKeyId，已脱敏：本地版填真实值>',
-  accessKeySecret: '<阿里云 AccessKeySecret，已脱敏：本地版填真实值>',
+  accessKeyId: '',
+  accessKeySecret: '',
   signName: '哈希流光',
   templateCode: 'SMS_495955218'
 };
@@ -545,6 +552,24 @@ async function pullProductsFromServer(phone) {
   }
 }
 
+// 节流地从服务端拉取产品库并写入本地：解决「reload/重开面板后看不到服务端新增产品」的问题。
+// 只在登录后拉取；默认 60s 内不重复请求，避免每次 GET_STATE 都打服务端。
+// 注意：只拉取不回写（不像登录那样 product-sync），所以即使拉取失败也不会误删服务端数据。
+let lastProductPullAt = 0;
+async function refreshProductsFromServerIfNeeded(force = false) {
+  try {
+    const auth = await getAuth().catch(() => null);
+    if (!auth || !auth.phone) return;
+    const now = Date.now();
+    if (!force && now - lastProductPullAt < 60 * 1000) return;
+    lastProductPullAt = now;
+    const remote = await pullProductsFromServer(auth.phone);
+    if (Array.isArray(remote)) {
+      await saveProducts(remote);
+    }
+  } catch (e) { /* 静默：拉取失败不能影响 GET_STATE 返回 */ }
+}
+
 // ===== 运行数据上报（服务端看板）=====
 // 失败静默忽略：上报不能影响主流程；8 秒超时防止服务端异常拖慢任务
 async function reportEvent(type, payload) {
@@ -565,6 +590,96 @@ async function reportEvent(type, payload) {
   } catch (e) {
     return null;
   }
+}
+
+// 上报潜在客户：评论获客流程中 AI 判为感兴趣的用户登记到看板，按产品维护。
+// 同一 (手机号, 产品, 用户) 重复上报由服务端 upsert 合并，不覆盖人工维护的状态/备注。
+function reportLead(payload) {
+  return reportEvent('lead', payload || {});
+}
+
+// ===== 每日发送上限（按手机号，仅统计成功的出站动作）=====
+// 单一数据源在服务端 action_logs；插件发送前查询今日已发数，达到上限即停任务，避免账号被风控。
+const QUOTA_CACHE_TTL = 30 * 1000; // 额度缓存 30s，避免每个动作都请求服务端
+let quotaCache = null;             // { date, total, fetchedAt }
+let quotaSessionSent = 0;          // 本次会话自上次拉取后成功发送的动作数（补齐服务端上报延迟）
+
+// 上报一条出站动作（comment/reply/dm/follow/share），仅在发送成功时调用
+function reportAction(actionType, extra = {}) {
+  const p = reportEvent('action', Object.assign({ action_type: actionType }, extra));
+  // 上报后把最新用量推给面板，让「今日已发」实时跳动（不阻塞主流程）
+  p.then(() => pushDailyUsage()).catch(() => {});
+  return p;
+}
+
+// 推送今日用量快照给面板
+function pushDailyUsage() {
+  getDailyUsageSnapshot().then((usage) => {
+    broadcast({ type: 'daily-usage', usage });
+  }).catch(() => {});
+}
+
+// 拉取某手机号今日已成功发送数（带缓存 + 会话增量）
+async function getTodayUsage(phone) {
+  try {
+    if (!quotaCache || Date.now() - quotaCache.fetchedAt > QUOTA_CACHE_TTL) {
+      const settings = await getSettings();
+      const base = (settings.reportUrl || '').replace(/\/+$/, '');
+      if (base) {
+        const res = await fetch(base + '/api/quota?phone=' + encodeURIComponent(phone), {
+          method: 'GET',
+          headers: { 'X-Api-Key': settings.reportKey || '' },
+          signal: AbortSignal.timeout(8000)
+        });
+        const j = await res.json().catch(() => null);
+        if (j && j.ok) {
+          // 服务端跨天（date 变化）则重置会话增量
+          if (quotaCache && quotaCache.date && j.date && quotaCache.date !== j.date) {
+            quotaSessionSent = 0;
+          }
+          quotaCache = { date: j.date, total: j.today_total || 0, fetchedAt: Date.now() };
+        }
+      }
+    }
+  } catch (e) {
+    log('warn', '查询每日额度失败：' + (e && e.message));
+  }
+  return (quotaCache ? quotaCache.total : 0) + quotaSessionSent;
+}
+
+// 检查是否达到每日上限；达到则停止当前任务并广播，返回 true。
+// 额度查询异常时返回 false（不阻断任务，避免误伤）。
+async function checkDailyLimit() {
+  try {
+    const settings = await getSettings();
+    const limit = Number(settings.dailyLimit);
+    if (!limit || limit <= 0) return false; // 0 或未设置 = 不限制
+    const auth = await getAuth();
+    const phone = auth && auth.phone;
+    if (!phone) return false;
+    const used = await getTodayUsage(phone);
+    if (used >= limit) {
+      log('warn', `今日已发送 ${used} 条，达到每日上限 ${limit}，停止任务以保护账号`);
+      task.stopRequested = true;
+      task.stopReason = `已达每日发送上限 ${used}/${limit}`;
+      broadcast({ type: 'daily-limit-hit', used, limit });
+      return true;
+    }
+    return false;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 供面板展示：返回当前今日用量快照（不强制刷新，用缓存值）
+async function getDailyUsageSnapshot() {
+  const settings = await getSettings();
+  const auth = await getAuth().catch(() => null);
+  const phone = auth && auth.phone;
+  const limit = Number(settings.dailyLimit) || 0;
+  if (!phone) return { phone: '', limit, used: 0, remaining: limit || 0 };
+  const used = await getTodayUsage(phone);
+  return { phone, limit, used, remaining: limit > 0 ? Math.max(0, limit - used) : -1 };
 }
 
 async function getCommentedNotes() {
@@ -913,6 +1028,93 @@ async function generateDM(product, info, target) {
   return c.slice(0, 120);
 }
 
+// ===== 视频推广：从视频简介生成推广搜索词 =====
+async function generatePromoKeywords(promo) {
+  const settings = await getSettings();
+  const keywordModel = settings.keywordModel || settings.model || 'qwen4-max-preview';
+  const sys =
+    '你是小红书内容兴趣分析专家。根据一个视频的简介，推断出"对这类视频感兴趣的人会主动搜什么词"，' +
+    '用来搜索同类视频，在它们的评论区里找到可能喜欢这个视频的用户。';
+  const user =
+    '视频标题：' + (promo.title || '(未填)') + '\n' +
+    '视频简介：' + (promo.intro || '(未填)') + '\n\n' +
+    '请生成小红书搜索关键词，要求：\n' +
+    '1. 是对这类视频/话题感兴趣的人会主动搜的词，口语化、像用户自己打的字，2~10 个字；\n' +
+    '2. 覆盖视频简介里的不同主题/角度，不要堆近义词；\n' +
+    '3. 不要包含视频里的具体人名、账号名；\n' +
+    '4. 共 8~12 个；\n' +
+    '5. 只输出 JSON：{"keywords":["词1","词2"]}';
+  const content = await callLLM(
+    [{ role: 'system', content: sys }, { role: 'user', content: user }],
+    { json: true, temperature: 0.6, model: keywordModel }
+  );
+  let parsed;
+  try { parsed = JSON.parse(content); } catch (e) {
+    const m = content.match(/\{[\s\S]*\}/);
+    if (m) { try { parsed = JSON.parse(m[0]); } catch (e2) { parsed = null; } }
+  }
+  const arr = (Array.isArray(parsed && parsed.keywords) ? parsed.keywords : [])
+    .map((x) => String(x).trim()).filter(Boolean);
+  return arr.filter((v, i, a) => a.indexOf(v) === i).slice(0, 15);
+}
+
+// ===== 视频推广：判断评论者是否会对我方视频感兴趣 =====
+async function analyzeVideoInterest(promo, info, comments) {
+  const list = comments.map((c) => `${c.index}. ${c.name}：${c.content}`).join('\n');
+  const sys =
+    '你是社交媒体受众分析专家，要从一条视频的评论区里找出"会对另一个指定视频感兴趣"的人。' +
+    '判断必须严格：只有评论明确表现出对该话题的好奇、认同、提问、想看、共鸣时才选中。';
+  const user =
+    '我方视频标题：' + (promo.title || '(未填)') + '\n' +
+    '我方视频简介：' + (promo.intro || '(未填)') + '\n\n' +
+    '当前所在视频标题：' + (info.title || '(无)') + '\n' +
+    '当前所在视频内容：' + (info.desc || '(无)') + '\n\n' +
+    '评论区（编号. 昵称：内容）：\n' + list + '\n\n' +
+    '请挑出"会对我方视频感兴趣"的评论，要求：\n' +
+    '1. 评论者表现出对我方视频话题的好奇、提问、认同、想看、或明确的兴趣信号；\n' +
+    '2. 纯灌水、纯表情、与话题无关的内容一律不选；\n' +
+    '3. 最多选 3 个，按感兴趣程度从高到低；\n' +
+    '4. 一条都不符合就返回空数组，不要硬凑。\n\n' +
+    '只输出 JSON：{"interested":[{"index":<评论编号>,"reason":"<一句话理由>"}]}';
+  const content = await callLLM(
+    [{ role: 'system', content: sys }, { role: 'user', content: user }],
+    { json: true, temperature: 0.3 }
+  );
+  let parsed;
+  try { parsed = JSON.parse(content); } catch (e) {
+    const m = content.match(/\{[\s\S]*\}/);
+    if (m) { try { parsed = JSON.parse(m[0]); } catch (e2) { parsed = null; } }
+  }
+  const arr = (parsed && Array.isArray(parsed.interested) && parsed.interested) || [];
+  return arr.filter((x) => x && typeof x.index === 'number')
+    .map((x) => ({ index: x.index, reason: String(x.reason || '').slice(0, 60) }));
+}
+
+// ===== 视频推广：生成分享配文（结合对方评论，自然推荐我方视频）=====
+async function generatePromoShareText(promo, info, target) {
+  const sys =
+    '你是小红书上一个真实用户，正要把一个视频分享给一位在评论区留言的用户。' +
+    '配文要像真人随手写的，自然、有针对性，绝不像群发广告。';
+  const user =
+    '我方视频标题：' + (promo.title || '(未填)') + '\n' +
+    '我方视频简介：' + (promo.intro || '(未填)') + '\n\n' +
+    '对方昵称：' + target.name + '\n' +
+    '对方在视频下的评论：' + target.content + '\n\n' +
+    '请写一句分享配文，要求：\n' +
+    '1. 10~30 字，口语化，像真人打字；\n' +
+    '2. 结合对方评论，说明为什么觉得这个视频他会感兴趣；\n' +
+    '3. 不要客服腔，不要"亲/您好/打扰了"，不要营销词；\n' +
+    '4. 只输出配文正文，不要引号、解释、换行。';
+  const content = await callLLM(
+    [{ role: 'system', content: sys }, { role: 'user', content: user }],
+    { temperature: 0.9 }
+  );
+  let c = (content || '').trim();
+  c = c.replace(/^["'""\s]+|["'""\s]+$/g, '');
+  c = c.replace(/\n+/g, ' ').trim();
+  return c.slice(0, 60);
+}
+
 // ===== content script 通信 =====
 async function sendContent(tabId, msg) {
   try {
@@ -1034,6 +1236,72 @@ async function recordDmed(userId, name) {
   await storageSet({ dmRecords: list.slice(-500) });
 }
 
+// ===== 视频推广配置（按手机号隔离）=====
+const DEFAULT_PROMO = {
+  videoUrl: '',          // 要推广的小红书视频链接
+  noteId: '',            // 从链接解析出的笔记 ID
+  title: '',             // 视频标题（可选）
+  intro: '',             // 视频简介：用于生成搜索词、判断兴趣、生成分享配文
+  keywords: [],          // 确认后的推广搜索词
+  maxVideosPerKeyword: 5, // 每个搜索词最多处理几个目标视频
+  maxInterestedPerVideo: 2, // 每个视频最多选几个感兴趣的人
+  maxFollowsPerRun: 10,  // 单轮关注上限
+  maxSharesPerRun: 10,   // 单轮分享上限
+  followDelayMin: 12,    // 关注后停留（秒）
+  followDelayMax: 25,
+  shareDelayMin: 15,     // 分享后停留（秒）
+  shareDelayMax: 30,
+  dryRun: true           // 默认空跑：只采集+分析+打日志，不真正关注/分享
+};
+async function getPromoConfig() {
+  const raw = await storageGet(await scopedKey('promo'), {});
+  return { ...DEFAULT_PROMO, ...(raw || {}) };
+}
+async function savePromoConfig(cfg) {
+  const key = await scopedKey('promo');
+  // 与当前已存配置合并：面板只发部分字段（如保存限制项）时，不能清空已确认的关键词等
+  const cur = await storageGet(key, {});
+  const merged = { ...DEFAULT_PROMO, ...(cur || {}), ...(cfg || {}) };
+  await storageSet({ [key]: merged });
+  return merged;
+}
+// 从视频链接解析 noteId（/discovery/item/<id> 或 /explore/<id>）
+function parseNoteId(url) {
+  if (!url) return '';
+  const m = String(url).match(/\/(?:discovery\/item|explore)\/([a-f0-9]+)/i);
+  return m ? m[1] : '';
+}
+
+// ===== 推广去重：已关注 / 已分享（按手机号隔离）=====
+async function getPromoFollowed() {
+  return (await storageGet(await scopedKey('promoFollowed'), [])) || [];
+}
+async function isPromoFollowed(userId) {
+  if (!userId) return false;
+  const list = await getPromoFollowed();
+  return list.some((r) => r.userId === userId);
+}
+async function recordPromoFollowed(userId, name) {
+  const key = await scopedKey('promoFollowed');
+  const list = await storageGet(key, []);
+  list.push({ userId, name: name || '', time: Date.now() });
+  await storageSet({ [key]: list.slice(-500) });
+}
+async function getPromoShared() {
+  return (await storageGet(await scopedKey('promoShared'), [])) || [];
+}
+async function isPromoShared(userId) {
+  if (!userId) return false;
+  const list = await getPromoShared();
+  return list.some((r) => r.userId === userId);
+}
+async function recordPromoShared(userId, name, method) {
+  const key = await scopedKey('promoShared');
+  const list = await storageGet(key, []);
+  list.push({ userId, name: name || '', method: method || '', time: Date.now() });
+  await storageSet({ [key]: list.slice(-500) });
+}
+
 // ===== 任务主循环 =====
 // cfg 两种形态：
 //   新建：{products, keywords, phone}
@@ -1054,6 +1322,13 @@ async function runTask(cfg) {
   const groups = buildProductGroups(products, keywords, settings.maxKeywordsPerTask);
   if (!groups.length) {
     log('error', '任务未启动：所选产品的优质关键词库为空，请先在「关键词」页生成并移入库');
+    task.running = false;
+    task.paused = false;
+    broadcastState();
+    return;
+  }
+  // 启动前检查每日上限：已达上限则不启动任务，避免账号被风控
+  if (await checkDailyLimit()) {
     task.running = false;
     task.paused = false;
     broadcastState();
@@ -1271,6 +1546,9 @@ async function runTask(cfg) {
             continue;
           }
 
+          // 每日上限检查：达到则停止整个任务（后续回复/私信由 !stopRequested 守卫跳过）
+          if (await checkDailyLimit()) break;
+
           let comment;
           try {
             // 70% 带钩子（共鸣+暗示解决+暗语引导），30% 纯共鸣，交替出现更自然
@@ -1287,6 +1565,8 @@ async function runTask(cfg) {
             task.progress.done = totalComments;
             syncStats();
             log('success', `评论已发布`);
+            quotaSessionSent++;
+            reportAction('comment', { phone: cfg.phone || '', note_id: note.id });
           } else {
             log('error', `评论发布失败：${(res && res.error) || '未知原因'}`);
           }
@@ -1342,6 +1622,26 @@ async function runTask(cfg) {
                 } catch (e) {
                   log('warn', `评论兴趣分析失败：${e.message}`);
                 }
+                // 上报潜在客户：所有被判为感兴趣的用户都登记到看板（去重由服务端 upsert 保证，
+                // 即使因「已回复/已私信」被过滤掉、本次不再触达，也仍保留客户记录）
+                for (const p of interested) {
+                  const t = fresh.find((c) => c.index === p.index);
+                  if (!t) continue;
+                  reportLead({
+                    phone: cfg.phone || '',
+                    product_name: product.name || '',
+                    user_id: t.userId || '',
+                    user_name: t.name || '',
+                    user_url: t.userUrl || '',
+                    note_id: note.id,
+                    note_url: note.url || '',
+                    note_title: info.title || '',
+                    keyword: kw,
+                    comment_content: t.content || '',
+                    interest_reason: p.reason || '',
+                    source: 'comment'
+                  });
+                }
                 // 回复与私信分别取前 N 个；picked 取两者较大值，供两个环节各自切片
                 const picked = interested.slice(0, Math.max(
                   settings.enableCommentReply ? settings.maxRepliesPerNote : 0,
@@ -1352,6 +1652,8 @@ async function runTask(cfg) {
                 }
                 for (const p of (settings.enableCommentReply ? picked.slice(0, settings.maxRepliesPerNote) : [])) {
                   if (task.stopRequested) break;
+                  // 每日上限检查：达到则停止后续回复
+                  if (await checkDailyLimit()) break;
                   await waitWhilePaused();
                   // 注意：LLM 返回的 index 是评论自身的 index 字段（DOM 位置），不是 fresh 数组下标
                   const target = fresh.find((c) => c.index === p.index);
@@ -1376,6 +1678,17 @@ async function runTask(cfg) {
                     syncStats();
                     log('success', `已回复「${target.name}」`);
                     await recordRepliedComment(note.id, target.name, target.content, reply, cfg.phone);
+                    // 同步更新该潜在客户的「已回复」动作（服务端 OR 合并，不影响人工状态/备注）
+                    reportLead({
+                      phone: cfg.phone || '',
+                      product_name: product.name || '',
+                      user_id: target.userId || '',
+                      user_name: target.name || '',
+                      user_url: target.userUrl || '',
+                      replied: true
+                    });
+                    quotaSessionSent++;
+                    reportAction('reply', { phone: cfg.phone || '', note_id: note.id, target_user_id: target.userId || '' });
                   } else {
                     log('error', `回复「${target.name}」失败：${(rr && rr.error) || '未知原因'}`);
                   }
@@ -1398,6 +1711,8 @@ async function runTask(cfg) {
                 if (settings.enablePrivateMessage && !task.stopRequested) {
                   for (const p of picked.slice(0, settings.maxDMsPerNote)) {
                     if (task.stopRequested) break;
+                    // 每日上限检查：达到则停止后续私信
+                    if (await checkDailyLimit()) break;
                     await waitWhilePaused();
                     const target = fresh.find((c) => c.index === p.index);
                     if (!target) continue;
@@ -1461,6 +1776,17 @@ async function runTask(cfg) {
                       syncStats();
                       log('success', `已给「${target.name}」发送私信`);
                       await recordDmed(dmUid, target.name);
+                      // 同步更新该潜在客户的「已私信」动作（服务端 OR 合并，不影响人工状态/备注）
+                      reportLead({
+                        phone: cfg.phone || '',
+                        product_name: product.name || '',
+                        user_id: target.userId || dmUid || '',
+                        user_name: target.name || '',
+                        user_url: target.userUrl || '',
+                        dmed: true
+                      });
+                      quotaSessionSent++;
+                      reportAction('dm', { phone: cfg.phone || '', note_id: note.id, target_user_id: dmUid || '' });
                     } else {
                       log('error', `给「${target.name}」发私信失败：${(dr && dr.error) || '未知原因'}`);
                     }
@@ -1582,6 +1908,266 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   }
 });
 
+// ===== 视频推广主循环 =====
+// cfg: { phone, dryRun }
+// 链路：推广搜索词 → 搜同类视频 → 爬评论 → LLM 判兴趣 → 关注 → 分享我方视频
+// dryRun=true 时只采集+分析+打日志，不真正关注/分享，用于验证链路
+async function runVideoPromo(cfg) {
+  const settings = await getSettings();
+  const promo = await getPromoConfig();
+  const phone = cfg.phone || '';
+  const dryRun = cfg.dryRun !== undefined ? cfg.dryRun : !!promo.dryRun;
+
+  const maxVideos = Number(promo.maxVideosPerKeyword) || 5;
+  const maxInterested = Number(promo.maxInterestedPerVideo) || 2;
+  const maxFollows = Number(promo.maxFollowsPerRun) || 0;
+  const maxShares = Number(promo.maxSharesPerRun) || 0;
+
+  const keywords = (promo.keywords || []).map((k) => String(k).trim()).filter(Boolean);
+  const noteId = parseNoteId(promo.videoUrl) || promo.noteId || '';
+
+  const failStart = () => {
+    task.running = false; task.paused = false; task.stopRequested = false;
+    broadcastState();
+  };
+  if (!promo.videoUrl) { log('error', '推广未启动：请先填写要推广的视频链接'); return failStart(); }
+  if (!noteId) { log('error', '推广未启动：无法从视频链接解析出笔记 ID'); return failStart(); }
+  if (!promo.intro) { log('error', '推广未启动：请先填写视频简介'); return failStart(); }
+  if (!keywords.length) { log('error', '推广未启动：请先生成并确认推广搜索词'); return failStart(); }
+  // 启动前检查每日上限：已达上限则不启动（空跑是模拟，不拦截）
+  if (!dryRun && await checkDailyLimit()) {
+    task.running = false; task.paused = false;
+    broadcastState();
+    return;
+  }
+
+  task.running = true;
+  task.paused = false;
+  task.stopRequested = false;
+  task.recordId = null;
+  let taskError = null;
+  let totalFollowed = 0;
+  let totalShared = 0;
+  let totalVideos = 0;
+
+  task.progress = {
+    mode: 'promo',
+    keyword: 0, keywordTotal: keywords.length,
+    note: 0, noteTotal: 0, done: 0, total: 0,
+    followed: 0, shared: 0, dryRun
+  };
+  broadcastState();
+
+  log('info', (dryRun ? '【空跑模式】' : '') +
+    `视频推广开始：推广视频「${promo.title || noteId}」，${keywords.length} 个搜索词，账号：${phone || '未登录'}`);
+  log('info', '执行链路：搜索词 → 同类视频 → 爬评论 → 判兴趣 → 关注 → 分享视频');
+  if (dryRun) log('warn', '空跑模式：不会真正点关注、不会真正发分享，仅采集+分析+打日志');
+
+  try {
+    const tab = await ensureTab();
+
+    for (let ki = 0; ki < keywords.length; ki++) {
+      if (task.stopRequested) break;
+      await waitWhilePaused();
+      const kw = keywords[ki];
+      task.progress.keyword = ki + 1;
+      task.progress.note = 0;
+      task.progress.noteTotal = 0;
+      broadcastState();
+
+      log('info', `[搜索词 ${ki + 1}/${keywords.length}] 搜索：${kw}`);
+      await navigateAndWait(tab.id, searchUrl(kw));
+      const ready = await waitForContentReady(tab.id);
+      if (!ready) { log('warn', '页面加载超时，跳过该搜索词'); continue; }
+      await humanSleep(settings.searchDelayMin, settings.searchDelayMax, '浏览搜索结果');
+
+      const r = await sendContent(tab.id, {
+        type: 'COLLECT_SEARCH_RESULTS',
+        max: maxVideos, minLikes: 0, scrollTimes: settings.scrollTimes
+      });
+      if (!r || !r.ok || !r.notes || !r.notes.length) {
+        log('warn', `搜索「${kw}」未采集到视频，跳过`);
+        continue;
+      }
+      task.progress.noteTotal = r.notes.length;
+      broadcastState();
+
+      for (let ni = 0; ni < r.notes.length; ni++) {
+        if (task.stopRequested) break;
+        await waitWhilePaused();
+        const note = r.notes[ni];
+        task.progress.note = ni + 1;
+        broadcastState();
+
+        if (note.id === noteId) {
+          log('info', `跳过：该视频是要推广的视频本身（${noteId}）`);
+          continue;
+        }
+        log('info', `[视频 ${ni + 1}/${r.notes.length}] 打开：${note.title || note.id}（点赞 ${note.likes ?? '?'}）`);
+        const opened = await sendContent(tab.id, { type: 'OPEN_NOTE', id: note.id });
+        if (!opened || !opened.ok) {
+          log('warn', '打开视频失败：' + (opened && opened.error ? opened.error : '未知'));
+          continue;
+        }
+        await humanSleep(settings.noteOpenDelayMin, settings.noteOpenDelayMax, '等待视频详情页加载');
+
+        const info = await sendContent(tab.id, { type: 'GET_NOTE_INFO' });
+        if (!info || !info.ok) { log('warn', '读取视频信息失败'); continue; }
+        const cResp = await sendContent(tab.id, { type: 'GET_COMMENTS', max: 15 });
+        const comments = (cResp && cResp.ok && cResp.comments) ? cResp.comments : [];
+        if (!comments.length) { log('info', '该视频评论区为空或未加载到，跳过'); continue; }
+        totalVideos++;
+        log('info', `采集到 ${comments.length} 条评论，正在用 AI 判断哪些用户对我方视频感兴趣...`);
+
+        let interested = [];
+        try {
+          interested = await analyzeVideoInterest(promo, info, comments);
+        } catch (e) {
+          log('warn', '兴趣分析失败：' + e.message);
+          continue;
+        }
+        const picks = interested.slice(0, maxInterested)
+          .map((x) => comments.find((c) => c.index === x.index))
+          .filter((c) => c && c.userId);
+        log('info', `判为感兴趣 ${interested.length} 人，取前 ${picks.length} 人处理`);
+        picks.forEach((p) => {
+          const reason = (interested.find((x) => x.index === p.index) || {}).reason || '';
+          log('info', `  · 感兴趣：${p.name}（${p.userId}）—— ${reason}`);
+        });
+
+        for (const target of picks) {
+          if (task.stopRequested) break;
+          // 每日上限检查：达到则停止（空跑是模拟，不拦截）
+          if (!dryRun && await checkDailyLimit()) break;
+          await waitWhilePaused();
+          if (!dryRun) {
+            if (maxFollows && totalFollowed >= maxFollows) {
+              log('warn', `已达单轮关注上限 ${maxFollows}，停止本轮`);
+              task.stopRequested = true; break;
+            }
+            if (maxShares && totalShared >= maxShares) {
+              log('warn', `已达单轮分享上限 ${maxShares}，停止本轮`);
+              task.stopRequested = true; break;
+            }
+          }
+          const alreadyF = await isPromoFollowed(target.userId);
+          const alreadyS = await isPromoShared(target.userId);
+          if (alreadyF && alreadyS) {
+            log('info', `跳过 ${target.name}（已关注且已分享过）`);
+            continue;
+          }
+
+          if (dryRun) {
+            const reason = (interested.find((x) => x.index === target.index) || {}).reason || '';
+            log('info', `【空跑】将关注 ${target.name}（${target.userId}），理由：${reason}`);
+            log('info', `【空跑】将把推广视频分享给 ${target.name}`);
+            totalFollowed++; totalShared++;
+            task.progress.followed = totalFollowed;
+            task.progress.shared = totalShared;
+            broadcastState();
+            await sleep(800);
+            continue;
+          }
+
+          // 1) 关注
+          if (!alreadyF) {
+            log('info', `进入 ${target.name} 的主页，准备关注`);
+            await navigateAndWait(tab.id, target.userUrl || ('https://www.xiaohongshu.com/user/profile/' + target.userId));
+            if (await waitForContentReady(tab.id)) {
+              const fres = await sendContent(tab.id, { type: 'FOLLOW_USER' });
+              if (fres && fres.ok) {
+                await recordPromoFollowed(target.userId, target.name);
+                totalFollowed++;
+                task.progress.followed = totalFollowed;
+                log('success', fres.alreadyFollowing ? `已关注 ${target.name}（此前已关注）` : `已关注 ${target.name}`);
+                // 「此前已关注」不产生新动作，不计入每日上限
+                if (!fres.alreadyFollowing) {
+                  quotaSessionSent++;
+                  reportAction('follow', { phone: cfg.phone || '', target_user_id: target.userId || '' });
+                }
+              } else {
+                log('warn', `关注 ${target.name} 失败：${fres && fres.error ? fres.error : '未知'}`);
+              }
+              broadcastState();
+              await humanSleep(promo.followDelayMin || 12, promo.followDelayMax || 25, '关注后停留');
+            } else {
+              log('warn', '用户主页加载超时，跳过关注');
+            }
+          } else {
+            log('info', `${target.name} 已关注过，跳过关注`);
+          }
+          if (task.stopRequested) break;
+
+          // 2) 分享我方视频
+          if (!alreadyS) {
+            log('info', `打开推广视频，准备分享给 ${target.name}`);
+            await navigateAndWait(tab.id, promo.videoUrl);
+            if (await waitForContentReady(tab.id)) {
+              let caption = '';
+              try { caption = await generatePromoShareText(promo, info, target); } catch (e) { caption = ''; }
+              const sres = await sendContent(tab.id, {
+                type: 'SHARE_NOTE_TO_USER',
+                userId: target.userId, userName: target.name, caption
+              });
+              if (sres && sres.ok) {
+                await recordPromoShared(target.userId, target.name, sres.method || 'share_panel');
+                totalShared++;
+                task.progress.shared = totalShared;
+                log('success', `已把推广视频分享给 ${target.name}（${sres.method || ''}）`);
+                quotaSessionSent++;
+                reportAction('share', { phone: cfg.phone || '', target_user_id: target.userId || '' });
+              } else if (sres && sres.fallback) {
+                // 原生转发面板走不通：打印完整诊断信息（面板是否找到/class/文本/所有按钮），不发送文字链接
+                log('warn', `原生转发面板走不通（${sres.error || '未知'}），按要求不发送文字链接，已跳过 ${target.name}`);
+                if (sres.candidateCount !== undefined) log('info', `  · 分享按钮候选数：${sres.candidateCount}，命中：${sres.shareBtnInfo || '无'}`);
+                log('info', `  · 面板是否找到：${sres.panelFound ? '是' : '否'}` + (sres.panelCls ? `，class=${sres.panelCls}` : ''));
+                if (sres.panelText) log('info', `  · 面板文本：${sres.panelText}`);
+                if (sres.dialogText) log('info', `  · 转发对话框文本：${sres.dialogText}`);
+                if (sres.searchFound !== undefined) log('info', `  · 对话框是否有搜索框：${sres.searchFound ? '有' : '无（只能在最近聊天/互相关注里选）'}`);
+                if (sres.visibleNames && sres.visibleNames.length) log('info', `  · 对话框可见用户名（共${sres.visibleNames.length}个）：${sres.visibleNames.join('、')}`);
+                if (sres.probe && sres.probe.length) {
+                  const probeTexts = sres.probe.map((p) => (p && p.text) || p).join('、');
+                  log('info', `  · 面板可点击项：${probeTexts}`);
+                } else {
+                  log('info', '  · 面板无可点击项（可能面板根本未弹出，需排查分享按钮）');
+                }
+                log('info', '  （请把以上诊断日志发给开发者，据此修正分享面板选择器）');
+              } else {
+                log('warn', `分享给 ${target.name} 失败：${sres && sres.error ? sres.error : '未知'}`);
+              }
+              broadcastState();
+              await humanSleep(promo.shareDelayMin || 15, promo.shareDelayMax || 30, '分享后停留');
+            } else {
+              log('warn', '推广视频页加载超时，跳过分享');
+            }
+          } else {
+            log('info', `已分享过视频给 ${target.name}，跳过`);
+          }
+        }
+        task.progress.done = (task.progress.done || 0) + picks.length;
+        broadcastState();
+      }
+      if (ki < keywords.length - 1 && !task.stopRequested) {
+        await humanSleep(settings.keywordIntervalMin, settings.keywordIntervalMax, '搜索词之间休息');
+      }
+    }
+  } catch (e) {
+    taskError = e;
+    log('error', '推广任务异常：' + e.message);
+  }
+
+  task.running = false;
+  task.paused = false;
+  task.stopRequested = false;
+  broadcastState();
+  if (taskError) {
+    log('error', '视频推广因异常结束');
+  } else {
+    log('success', (dryRun ? '【空跑】' : '') +
+      `视频推广完成：处理 ${totalVideos} 个视频，关注 ${totalFollowed} 人，分享 ${totalShared} 人`);
+  }
+}
+
 // ===== 消息处理 =====
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   handleMessage(msg, sender)
@@ -1610,17 +2196,21 @@ async function handleMessage(msg, sender) {
         '（本地=' + (authDiag.local || '无') + '，同步=' + (authDiag.sync || '无') + '）');
       // 面板拉取状态时顺手 reconcile：被关机/SW 回收打断的任务在这里标记为已中断
       const taskList = await reconcileInterruptedTasks();
+      // 打开面板时从服务端拉取最新产品库（节流），这样服务端新增的产品无需重新登录即可显示
+      await safe(refreshProductsFromServerIfNeeded, undefined);
       return {
         ok: true,
         settings: await safe(getSettings, {}),
         products: await safe(getProducts, []),
         qualityKeywords: await safe(ensureQualityKeywords, []),
         commentedNotes: await safe(getCommentedNotes, []),
+        promo: await safe(getPromoConfig, {}),
         auth: curAuth,
         authDiag,
         task: { ...task, progress: { ...task.progress } },
         tasks: taskList.map(taskSummary),
         logs: logs.slice(-200),
+        dailyUsage: await safe(getDailyUsageSnapshot, null),
         modelOptions: MODEL_OPTIONS
       };
     case 'SAVE_SETTINGS':
@@ -1829,6 +2419,72 @@ async function handleMessage(msg, sender) {
       await clearAuth();
       log('info', '已退出登录');
       return { ok: true };
+    case 'SAVE_PROMO': {
+      const cfg = msg.promo || {};
+      cfg.noteId = parseNoteId(cfg.videoUrl) || cfg.noteId || '';
+      const merged = await savePromoConfig(cfg);
+      log('info', '推广配置已保存');
+      return { ok: true, promo: merged };
+    }
+    case 'GENERATE_PROMO_KEYWORDS': {
+      const promo = msg.promo || {};
+      if (!promo.intro) return { ok: false, error: '请先填写视频简介' };
+      try {
+        log('info', '正在用 AI 生成推广搜索词...');
+        const kws = await generatePromoKeywords(promo);
+        log('success', `已生成 ${kws.length} 个推广搜索词`);
+        return { ok: true, keywords: kws };
+      } catch (e) {
+        log('error', `推广搜索词生成失败：${e.message}`);
+        return { ok: false, error: e.message };
+      }
+    }
+    case 'START_PROMO': {
+      if (task.running) return { ok: false, error: '已有任务在运行中' };
+      const authP = await getAuth();
+      if (!authP || !authP.phone) return { ok: false, error: '请先使用手机号验证码登录' };
+      log('info', `收到启动推广请求，dryRun=${msg.dryRun}（${msg.dryRun ? '空跑-不真实执行' : '真实执行关注/分享'}）`);
+      runVideoPromo({ phone: authP.phone, dryRun: msg.dryRun });
+      return { ok: true };
+    }
+    case 'PROBE_SHARE': {
+      // 测试用：打开推广视频，只读探测分享面板结构（不发送）
+      const promoP = await getPromoConfig();
+      if (!promoP.videoUrl) return { ok: false, error: '请先填写推广视频链接' };
+      const tab = await ensureTab();
+      await navigateAndWait(tab.id, promoP.videoUrl);
+      await waitForContentReady(tab.id);
+      const r = await sendContent(tab.id, { type: 'PROBE_SHARE' });
+      if (r && r.ok) {
+        log('info', '【探测】候选分享按钮数：' + (r.candidateCount || 0));
+        (r.tried || []).forEach((t, i) => {
+          log('info', `【探测候选${i + 1}】点击=${t.clicked} cls=${t.cls} text=${t.text || ''} aria=${t.aria || ''} rect=${JSON.stringify(t.rect)} 新文本=${JSON.stringify(t.newTexts || [])} 特征=${JSON.stringify(t.sigs || [])} 浮层数=${t.overlayCount || 0}`);
+          if (t.overlays && t.overlays.length) {
+            t.overlays.forEach((o, j) => {
+              log('info', `  浮层${j + 1}: pos=${o.pos} cls=${o.cls} text=${o.text}`);
+              log('info', `  浮层${j + 1} 可交互项: ` + JSON.stringify(o.items || []));
+              log('info', `  浮层${j + 1} HTML摘要: ` + (o.html || ''));
+            });
+          }
+        });
+        if (r.panelInfo) {
+          log('info', '【探测】面板 found=' + r.panelInfo.found + ' cls=' + r.panelInfo.cls);
+          log('info', '【探测】面板项：' + JSON.stringify(r.panelInfo.items || []));
+        }
+        if (!r.effective) log('warn', '【探测】所有候选点击后均未出现分享面板特征，可能需手动确认分享按钮位置');
+      }
+      return r || { ok: false, error: '探测无响应' };
+    }
+    case 'CLEAR_PROMO_FOLLOWED': {
+      await storageSet({ [await scopedKey('promoFollowed')]: [] });
+      log('info', '已清空推广关注记录');
+      return { ok: true };
+    }
+    case 'CLEAR_PROMO_SHARED': {
+      await storageSet({ [await scopedKey('promoShared')]: [] });
+      log('info', '已清空推广分享记录');
+      return { ok: true };
+    }
     default:
       return { ok: false, error: '未知消息类型：' + msg.type };
   }

@@ -5,11 +5,15 @@ let state = {
   products: [],
   qualityKeywords: [],
   candidates: [],
+  promo: {},
+  promoCandidates: [],
   auth: null,
   task: { running: false, paused: false },
   tasks: [],
   modelOptions: []
 };
+// 产品列表上次渲染的签名：只有服务端拉取带来真实变化时才重渲染，避免轮询覆盖正在编辑的内容
+let lastProductsSig = '';
 
 const $ = (id) => document.getElementById(id);
 
@@ -39,6 +43,13 @@ function onPanelMessage(msg) {
     renderLogs(msg.logs);
   } else if (msg.type === 'logsCleared') {
     clearLogs();
+  } else if (msg.type === 'daily-usage') {
+    if (msg.usage != null) state.dailyUsage = msg.usage;
+    renderDailyUsage();
+  } else if (msg.type === 'daily-limit-hit') {
+    const prevBy = (state.dailyUsage && state.dailyUsage.byType) || {};
+    state.dailyUsage = { used: msg.used || 0, limit: msg.limit || 0, remaining: 0, byType: prevBy };
+    renderDailyUsage();
   }
 }
 function connectPanel() {
@@ -53,19 +64,34 @@ function connectPanel() {
   });
 }
 // 重连/手动刷新：重新拉取后台状态（任务、日志、任务列表）
-async function refreshState() {
+async function refreshState(silent) {
   const resp = await send({ type: 'GET_STATE' });
   if (!resp || !resp.ok) return;
   state.settings = resp.settings || state.settings;
   state.task = resp.task || state.task;
   state.tasks = resp.tasks || [];
+  // 产品库：仅在服务端拉取带来真实变化时重渲染，避免覆盖正在编辑的输入
+  if (Array.isArray(resp.products)) {
+    const sig = resp.products.map((p) => p.id + ':' + (p.selected ? 1 : 0) + ':' + p.name).join('|');
+    if (sig !== lastProductsSig) {
+      lastProductsSig = sig;
+      state.products = resp.products;
+      renderProducts();
+    }
+  }
+  if (resp.dailyUsage != null) state.dailyUsage = resp.dailyUsage;
   if (resp.qualityKeywords) {
     state.qualityKeywords = resp.qualityKeywords;
     renderKeywordGroups();
   }
+  if (resp.promo) {
+    state.promo = resp.promo;
+    renderPromoForm();
+  }
   renderStatus();
   renderTaskList();
-  renderLogs(resp.logs || []);
+  renderDailyUsage();
+  if (!silent) renderLogs(resp.logs || []);
 }
 
 // 登录/退出后重新拉取：产品、设置、优质关键词库都按手机号隔离，切换账号后必须刷新，
@@ -76,17 +102,21 @@ async function reloadUserData() {
   state.settings = resp.settings || {};
   state.products = resp.products || [];
   state.qualityKeywords = resp.qualityKeywords || [];
+  state.promo = resp.promo || state.promo;
   state.auth = resp.auth || null;
   applyAuthUI();
   try {
     renderProducts();
     fillSettingsForm();
     renderKeywordGroups();
+    renderPromoForm();
   } catch (e) {
     console.error('刷新用户数据失败：', e);
   }
 }
 connectPanel();
+// 每 30 秒静默刷新一次状态：今日用量、任务列表、进度在没有广播时也能保持最新（不重渲染日志）
+setInterval(() => { try { refreshState(true); } catch (e) {} }, 30000);
 
 // ===== 日志 =====
 function appendLog(entry) {
@@ -157,10 +187,17 @@ function renderStatus() {
   if (t.running && p.keywordTotal) {
     const total = p.total || (p.keywordTotal * (p.noteTotal || 1));
     const done = (p.keyword - 1) * (p.noteTotal || 1) + (p.note || 0);
-    const productPart = p.productTotal > 1 ? `产品 ${p.product}/${p.productTotal} · ` : '';
-    const dmPart = p.dms ? ` · 已私信 ${p.dms}` : '';
-    $('progressText').textContent =
-      productPart + `关键词 ${p.keyword}/${p.keywordTotal} · 视频 ${p.note || 0}/${p.noteTotal || 0} · 已评论 ${p.done || 0}` + dmPart;
+    let label;
+    if (p.mode === 'promo') {
+      // 推广任务：展示关键词/视频进度 + 累计关注/分享数，空跑加标识
+      label = `关键词 ${p.keyword}/${p.keywordTotal} · 视频 ${p.note || 0}/${p.noteTotal || 0} · 已关注 ${p.followed || 0} · 已分享 ${p.shared || 0}` +
+        (p.dryRun ? '（空跑）' : '');
+    } else {
+      const productPart = p.productTotal > 1 ? `产品 ${p.product}/${p.productTotal} · ` : '';
+      const dmPart = p.dms ? ` · 已私信 ${p.dms}` : '';
+      label = productPart + `关键词 ${p.keyword}/${p.keywordTotal} · 视频 ${p.note || 0}/${p.noteTotal || 0} · 已评论 ${p.done || 0}` + dmPart;
+    }
+    $('progressText').textContent = label;
     const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
     $('progressBar').style.width = pct + '%';
   } else if (t.running) {
@@ -170,6 +207,40 @@ function renderStatus() {
     $('progressText').textContent = '未开始';
     $('progressBar').style.width = '0';
   }
+}
+
+// 今日发送用量 + 超限横幅（数据来自后台 dailyUsage 快照）
+function renderDailyUsage() {
+  const box = $('dailyUsage');
+  const text = $('dailyUsageText');
+  const remain = $('dailyUsageRemain');
+  const banner = $('dailyLimitBanner');
+  if (!box || !text) return;
+  const u = state.dailyUsage || {};
+  const limit = Number(u.limit != null ? u.limit
+    : ((state.settings && state.settings.dailyLimit) != null ? state.settings.dailyLimit : 50));
+  const used = Number(u.used || 0);
+  // 未登录/无数据时不展示
+  const show = !!(u.phone || used > 0);
+  box.style.display = show ? '' : 'none';
+  if (!show) { if (banner) banner.style.display = 'none'; return; }
+  if (limit > 0) {
+    text.textContent = `${used} / ${limit}`;
+    const left = Math.max(0, limit - used);
+    remain.textContent = `剩余 ${left}`;
+    remain.style.display = '';
+    const pct = limit > 0 ? used / limit : 0;
+    box.classList.toggle('hit', used >= limit);
+    box.classList.toggle('warn', used < limit && pct >= 0.8);
+  } else {
+    text.textContent = `${used}（不限）`;
+    remain.style.display = 'none';
+    box.classList.remove('hit', 'warn');
+  }
+  // 超限横幅：用量达上限，或任务因超限被停止
+  const taskStoppedByLimit = state.task && state.task.stopReason && /每日发送上限|daily/i.test(state.task.stopReason);
+  const hit = (limit > 0 && used >= limit) || !!taskStoppedByLimit;
+  if (banner) banner.style.display = hit ? '' : 'none';
 }
 
 // ===== 任务列表 =====
@@ -397,6 +468,7 @@ function fillSettingsForm() {
   $('autoRestartInterrupted').checked = s.autoRestartInterrupted !== false;
   $('autoRestartDelayMin').value = s.autoRestartDelayMin != null ? s.autoRestartDelayMin : 5;
   $('autoRestartMaxAttempts').value = s.autoRestartMaxAttempts != null ? s.autoRestartMaxAttempts : 5;
+  $('dailyLimit').value = s.dailyLimit != null ? s.dailyLimit : 50;
 
   const modelSel = $('model');
   modelSel.innerHTML = '';
@@ -454,7 +526,8 @@ function collectSettingsForm() {
     dmDelayMax: num('dmDelayMax'),
     autoRestartInterrupted: $('autoRestartInterrupted').checked,
     autoRestartDelayMin: num('autoRestartDelayMin'),
-    autoRestartMaxAttempts: num('autoRestartMaxAttempts')
+    autoRestartMaxAttempts: num('autoRestartMaxAttempts'),
+    dailyLimit: num('dailyLimit')
   };
 }
 
@@ -780,6 +853,103 @@ function updateProductKwCounts() {
   });
 }
 
+// ===== 推广：视频推广 =====
+function renderPromoForm() {
+  const p = state.promo || {};
+  const v = (id, val) => { const el = $(id); if (el) el.value = val != null ? val : ''; };
+  v('promoVideoUrl', p.videoUrl);
+  v('promoTitle', p.title);
+  v('promoIntro', p.intro);
+  v('promoMaxVideos', p.maxVideosPerKeyword != null ? p.maxVideosPerKeyword : 5);
+  v('promoMaxInterested', p.maxInterestedPerVideo != null ? p.maxInterestedPerVideo : 2);
+  v('promoMaxFollows', p.maxFollowsPerRun != null ? p.maxFollowsPerRun : 10);
+  v('promoMaxShares', p.maxSharesPerRun != null ? p.maxSharesPerRun : 10);
+  v('promoFollowMin', p.followDelayMin != null ? p.followDelayMin : 12);
+  v('promoFollowMax', p.followDelayMax != null ? p.followDelayMax : 25);
+  v('promoShareMin', p.shareDelayMin != null ? p.shareDelayMin : 15);
+  v('promoShareMax', p.shareDelayMax != null ? p.shareDelayMax : 30);
+  const dry = $('promoDryRun'); if (dry) dry.checked = p.dryRun !== false;
+  renderPromoKeywords();
+  renderPromoCandidates();
+}
+
+// 已确认的推广搜索词：chips 展示，单条可移除
+function renderPromoKeywords() {
+  const box = $('promoKeywords');
+  if (!box) return;
+  box.innerHTML = '';
+  const kws = (state.promo && state.promo.keywords) || [];
+  if (!kws.length) {
+    box.innerHTML = '<span class="kw-lib-empty">暂未确认搜索词：AI 生成后勾选并点「确认使用选中词」</span>';
+    return;
+  }
+  kws.forEach((text) => {
+    const chip = document.createElement('span');
+    chip.className = 'kw-chip';
+    chip.textContent = text;
+    const del = document.createElement('button');
+    del.className = 'kw-del';
+    del.title = '移除该搜索词';
+    del.textContent = '×';
+    del.addEventListener('click', async () => {
+      state.promo.keywords = kws.filter((k) => k !== text);
+      const r = await send({ type: 'SAVE_PROMO', promo: collectPromoForm() });
+      if (r && r.ok) state.promo = r.promo || state.promo;
+      renderPromoKeywords();
+      flash('已移除搜索词：' + text, true);
+    });
+    chip.appendChild(del);
+    box.appendChild(chip);
+  });
+}
+
+// AI 候选推广词：默认全选的复选框列表（确认时直接从 DOM 读勾选项）
+function renderPromoCandidates() {
+  const box = $('promoCandidates');
+  if (!box) return;
+  box.innerHTML = '';
+  const list = state.promoCandidates || [];
+  if (!list.length) return;
+  list.forEach((text) => {
+    const label = document.createElement('label');
+    label.className = 'kw-cand-item';
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = true;
+    cb.dataset.candText = text;
+    const txt = document.createElement('span');
+    txt.textContent = text;
+    label.appendChild(cb);
+    label.appendChild(txt);
+    box.appendChild(label);
+  });
+}
+
+// 从表单采集推广配置（关键词取 state.promo 里已确认的，不从 DOM）
+function collectPromoForm() {
+  const num = (id) => {
+    const el = $(id); if (!el) return 0;
+    const v = parseFloat(el.value);
+    return isNaN(v) ? 0 : v;
+  };
+  const p = state.promo || {};
+  return {
+    videoUrl: $('promoVideoUrl').value.trim(),
+    title: $('promoTitle').value.trim(),
+    intro: $('promoIntro').value.trim(),
+    keywords: p.keywords || [],
+    maxVideosPerKeyword: num('promoMaxVideos'),
+    maxInterestedPerVideo: num('promoMaxInterested'),
+    maxFollowsPerRun: num('promoMaxFollows'),
+    maxSharesPerRun: num('promoMaxShares'),
+    followDelayMin: num('promoFollowMin'),
+    followDelayMax: num('promoFollowMax'),
+    shareDelayMin: num('promoShareMin'),
+    shareDelayMax: num('promoShareMax'),
+    dryRun: $('promoDryRun').checked
+  };
+}
+
 // ===== 初始化 =====
 async function init() {
   let resp = await send({ type: 'GET_STATE' });
@@ -792,6 +962,7 @@ async function init() {
     state.settings = resp.settings || {};
     state.products = resp.products || [];
     state.qualityKeywords = resp.qualityKeywords || [];
+    state.promo = resp.promo || {};
     state.auth = resp.auth || null;
     state.task = resp.task || {};
     state.tasks = resp.tasks || [];
@@ -803,6 +974,7 @@ async function init() {
       renderProducts();
       fillSettingsForm();
       renderKeywordGroups();
+      renderPromoForm();
       renderLogs(resp.logs || []);
       renderStatus();
       renderTaskList();
@@ -1035,6 +1207,137 @@ function bindEvents() {
     const r = await send({ type: 'SAVE_SETTINGS', settings: collectSettingsForm() });
     state.settings = collectSettingsForm();
     flash(r.ok ? '重启设置已保存' : ('保存失败：' + r.error), r.ok);
+  });
+  $('btnSaveDailyLimit').addEventListener('click', async () => {
+    const r = await send({ type: 'SAVE_SETTINGS', settings: collectSettingsForm() });
+    state.settings = collectSettingsForm();
+    flash(r.ok ? '每日上限已保存' : ('保存失败：' + r.error), r.ok);
+    try { await refreshState(true); } catch (e) {}
+  });
+
+  // ===== 推广：视频推广 =====
+  $('btnSavePromo').addEventListener('click', async () => {
+    const r = await send({ type: 'SAVE_PROMO', promo: collectPromoForm() });
+    if (r && r.ok) { state.promo = r.promo || collectPromoForm(); flash('推广配置已保存', true); }
+    else flash('保存失败：' + ((r && r.error) || '未知'), false);
+  });
+
+  $('btnGenPromoKw').addEventListener('click', async () => {
+    const promo = collectPromoForm();
+    if (!promo.intro) return flash('请先填写视频简介', false);
+    const btn = $('btnGenPromoKw');
+    btn.disabled = true;
+    // 生成中是 LLM 调用，无真实进度：用按钮文字 + 已等待秒数提示
+    const startedAt = Date.now();
+    const timer = setInterval(() => {
+      btn.textContent = 'AI 生成中… 已等待 ' + Math.floor((Date.now() - startedAt) / 1000) + ' 秒';
+    }, 1000);
+    btn.textContent = 'AI 生成中… 已等待 0 秒';
+    try {
+      const r = await send({ type: 'GENERATE_PROMO_KEYWORDS', promo });
+      if (r && r.ok && r.keywords && r.keywords.length) {
+        state.promoCandidates = r.keywords.slice();
+        renderPromoCandidates();
+        flash(`已生成 ${r.keywords.length} 个搜索词，勾选后点「确认使用选中词」`, true);
+      } else {
+        flash('生成失败：' + ((r && r.error) || '未知'), false);
+      }
+    } finally {
+      clearInterval(timer);
+      btn.textContent = 'AI 生成搜索词';
+      btn.disabled = false;
+    }
+  });
+
+  $('btnConfirmPromoKw').addEventListener('click', async () => {
+    const box = $('promoCandidates');
+    const checked = Array.from(box.querySelectorAll('input[type="checkbox"]:checked'))
+      .map((cb) => cb.dataset.candText).filter(Boolean);
+    if (!checked.length) return flash('请至少勾选一个搜索词', false);
+    state.promo = state.promo || {};
+    state.promo.keywords = checked.slice();
+    const r = await send({ type: 'SAVE_PROMO', promo: collectPromoForm() });
+    if (r && r.ok) {
+      state.promo = r.promo || collectPromoForm();
+      state.promoCandidates = [];
+      renderPromoCandidates();
+      renderPromoKeywords();
+      flash(`已确认 ${checked.length} 个推广搜索词`, true);
+    } else {
+      flash('确认失败：' + ((r && r.error) || '未知'), false);
+    }
+  });
+
+  // 空跑开关：变更即保存，避免被 renderPromoForm 在状态刷新时覆盖回默认勾选
+  $('promoDryRun').addEventListener('change', async () => {
+    const checked = $('promoDryRun').checked;
+    state.promo = state.promo || {};
+    state.promo.dryRun = checked;
+    const r = await send({ type: 'SAVE_PROMO', promo: collectPromoForm() });
+    if (r && r.ok) state.promo = r.promo || state.promo;
+    flash(checked ? '已开启空跑模式' : '已关闭空跑模式，将真实执行关注/分享', true);
+  });
+
+  $('btnStartPromo').addEventListener('click', async () => {
+    const cfg = collectPromoForm();
+    if (!cfg.videoUrl) return flash('请先填写推广视频链接', false);
+    if (!cfg.intro) return flash('请先填写视频简介', false);
+    if (!(cfg.keywords && cfg.keywords.length)) return flash('请先生成并确认推广搜索词', false);
+    // 先保存最新配置，再启动任务
+    const s = await send({ type: 'SAVE_PROMO', promo: cfg });
+    if (s && s.ok) state.promo = s.promo || cfg;
+    const r = await send({ type: 'START_PROMO', dryRun: cfg.dryRun });
+    if (r && r.ok) {
+      flash(cfg.dryRun ? '空跑推广已启动，请看「运行」页日志' : '推广已启动，请看「运行」页日志', true);
+      switchTab('run');
+    } else {
+      flash('启动失败：' + ((r && r.error) || '未知'), false);
+    }
+  });
+
+  $('btnProbeShare').addEventListener('click', async () => {
+    const btn = $('btnProbeShare');
+    btn.disabled = true;
+    btn.textContent = '探测中…';
+    try {
+      const r = await send({ type: 'PROBE_SHARE' });
+      const el = $('promoProgress');
+      if (r && r.ok) {
+        const cand = r.candidateCount || 0;
+        const hit = r.effective;
+        let line = `探测完成：找到 ${cand} 个候选分享按钮`;
+        if (hit) {
+          line += `，命中候选「${hit.text || hit.aria || hit.cls}」，`;
+          line += `面板${r.panelFound ? '已找到' : '特征已出现但容器未匹配'}，`;
+          line += `特征文本：${(hit.sigs || []).join('/') || '无'}，浮层数：${hit.overlayCount || 0}`;
+        } else {
+          line += '，但点击后均未出现分享面板特征（微信/复制链接/私信等）。';
+        }
+        line += ' 完整诊断详见「运行」页日志，请把日志贴给我。';
+        el.textContent = line;
+        el.className = 'test-result ok';
+        flash('探测完成，请查看「运行」页日志并贴给我', true);
+      } else {
+        const err = (r && r.error) || '未知';
+        el.textContent = '探测失败：' + err;
+        el.className = 'test-result err';
+        flash('探测失败：' + err, false);
+      }
+    } finally {
+      btn.textContent = '探测分享面板';
+      btn.disabled = false;
+    }
+  });
+
+  $('btnClearPromoFollowed').addEventListener('click', async () => {
+    if (!confirm('确定清空推广关注记录？（只清去重记录，不影响已关注的人）')) return;
+    const r = await send({ type: 'CLEAR_PROMO_FOLLOWED' });
+    flash(r && r.ok ? '已清空关注记录' : ('操作失败：' + ((r && r.error) || '未知')), !!(r && r.ok));
+  });
+  $('btnClearPromoShared').addEventListener('click', async () => {
+    if (!confirm('确定清空推广分享记录？（只清去重记录）')) return;
+    const r = await send({ type: 'CLEAR_PROMO_SHARED' });
+    flash(r && r.ok ? '已清空分享记录' : ('操作失败：' + ((r && r.error) || '未知')), !!(r && r.ok));
   });
 }
 

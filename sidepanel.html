@@ -24,6 +24,7 @@
 
   <nav class="tabs">
     <button class="tab active" data-tab="run">运行</button>
+    <button class="tab" data-tab="promo">推广</button>
     <button class="tab" data-tab="tasklist">任务列表</button>
     <button class="tab" data-tab="products">产品</button>
     <button class="tab" data-tab="task">关键词</button>
@@ -67,6 +68,14 @@
           <span id="progressText">未开始</span>
           <div class="bar"><div id="progressBar" class="fill"></div></div>
         </div>
+        <div id="dailyUsage" class="daily-usage" style="display:none">
+          <span class="du-label">今日已发</span>
+          <span id="dailyUsageText">0 / 50</span>
+          <span id="dailyUsageRemain" class="du-remain">剩余 50</span>
+        </div>
+        <div id="dailyLimitBanner" class="daily-limit-banner" style="display:none">
+          ⚠ 已达今日发送上限，任务已停止。请明天再试（可在「设置」调整上限，0 = 不限）。
+        </div>
       </div>
 
       <div class="card logs-card">
@@ -75,6 +84,72 @@
           <button id="btnExportLogs" class="btn btn-small">导出</button>
         </div>
         <div id="logs" class="logs"></div>
+      </div>
+    </section>
+
+    <!-- 推广：视频推广 -->
+    <section id="tab-promo" class="panel">
+      <div class="card">
+        <div class="card-head"><span>要推广的视频</span></div>
+        <p class="test-result">填写你要推广的小红书视频链接和简介。AI 会根据简介生成搜索词，去搜同类视频，在它们的评论区里找出可能喜欢你视频的人，关注后把视频分享给他。</p>
+        <div class="field">
+          <label>视频链接</label>
+          <input id="promoVideoUrl" type="text" placeholder="https://www.xiaohongshu.com/discovery/item/..." />
+        </div>
+        <div class="field">
+          <label>视频标题（可选）</label>
+          <input id="promoTitle" type="text" placeholder="简单填一下，AI 主要用简介" />
+        </div>
+        <div class="field">
+          <label>视频简介</label>
+          <textarea id="promoIntro" rows="4" placeholder="这个视频讲了什么、适合谁看、核心看点是什么……写得越清楚，AI 找的人越准"></textarea>
+        </div>
+        <div class="row">
+          <button id="btnSavePromo" class="btn btn-primary">保存推广配置</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span>推广搜索词</span></div>
+        <p class="test-result">AI 根据视频简介生成"对这类视频感兴趣的人会搜的词"。先在候选里勾选，再确认移入推广词库。</p>
+        <div class="row">
+          <button id="btnGenPromoKw" class="btn btn-primary">AI 生成搜索词</button>
+        </div>
+        <div id="promoCandidates" class="kw-groups"></div>
+        <div class="row">
+          <button id="btnConfirmPromoKw" class="btn">确认使用选中词</button>
+        </div>
+        <div class="field">
+          <label>已确认的推广搜索词</label>
+          <div id="promoKeywords" class="kw-groups"></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span>限制与模式</span></div>
+        <div class="field-grid">
+          <div class="field"><label>每词搜视频数</label><input id="promoMaxVideos" type="number" min="1" max="20" value="5" /></div>
+          <div class="field"><label>每视频取感兴趣人数</label><input id="promoMaxInterested" type="number" min="1" max="5" value="2" /></div>
+          <div class="field"><label>单轮关注上限</label><input id="promoMaxFollows" type="number" min="0" max="100" value="10" /></div>
+          <div class="field"><label>单轮分享上限</label><input id="promoMaxShares" type="number" min="0" max="100" value="10" /></div>
+          <div class="field"><label>关注后停留 最小(秒)</label><input id="promoFollowMin" type="number" min="5" value="12" /></div>
+          <div class="field"><label>关注后停留 最大(秒)</label><input id="promoFollowMax" type="number" min="10" value="25" /></div>
+          <div class="field"><label>分享后停留 最小(秒)</label><input id="promoShareMin" type="number" min="5" value="15" /></div>
+          <div class="field"><label>分享后停留 最大(秒)</label><input id="promoShareMax" type="number" min="10" value="30" /></div>
+        </div>
+        <div class="field checkbox">
+          <label><input id="promoDryRun" type="checkbox" checked /> 空跑模式（只采集+分析+打日志，不真正关注/分享，建议首次先空跑验证）</label>
+        </div>
+        <p id="promoProgress" class="test-result"></p>
+        <div class="row">
+          <button id="btnStartPromo" class="btn btn-primary">▶ 开始推广</button>
+          <button id="btnProbeShare" class="btn" title="打开推广视频，只读探测分享面板结构，不发送">探测分享面板</button>
+        </div>
+        <div class="row">
+          <button id="btnClearPromoFollowed" class="btn btn-small">清空关注记录</button>
+          <button id="btnClearPromoShared" class="btn btn-small">清空分享记录</button>
+        </div>
+        <p class="test-result">关注和分享都会去重：同一用户不会重复关注、不会重复收到分享。详情和进度请看「运行」页的执行日志。</p>
       </div>
     </section>
 
@@ -179,7 +254,7 @@
         <div class="field-grid">
           <div class="field">
             <label>数据上报地址</label>
-            <input id="reportUrl" type="text" placeholder="http://124.221.115.174/xhs-report" />
+            <input id="reportUrl" type="text" placeholder="https://linkpal.cloud/xhs-report" />
           </div>
           <div class="field">
             <label>上报密钥</label>
@@ -282,6 +357,20 @@
           <button id="btnSaveRetry" class="btn btn-primary">保存重启设置</button>
         </div>
         <p class="test-result">重启会从断点继续，已评论/回复/私信的内容不会重复执行；等待重启期间也可以手动「继续执行」。关闭后任务中断只会在任务列表提示，不再自动重启。</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><span>账号安全 · 每日发送上限</span></div>
+        <div class="field-grid">
+          <div class="field">
+            <label>每手机号每日发送总上限（0=不限）</label>
+            <input id="dailyLimit" type="number" min="0" max="10000" value="50" />
+          </div>
+        </div>
+        <div class="row">
+          <button id="btnSaveDailyLimit" class="btn btn-primary">保存上限设置</button>
+        </div>
+        <p class="test-result">统计范围：主评论 + 回复 + 私信 + 推广关注 + 分享，仅统计发送成功的次数。达到上限后任务会自动停止，避免账号被风控禁用；次日自动重置。</p>
       </div>
     </section>
   </main>

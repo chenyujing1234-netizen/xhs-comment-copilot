@@ -179,6 +179,31 @@ body.not-logged #btnStop { display: none; }
 .test-result.ok { color: var(--success); }
 .test-result.err { color: var(--error); }
 
+/* 每日发送上限（账号安全） */
+.daily-usage {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.daily-usage .du-label { color: var(--muted); }
+.daily-usage #dailyUsageText { font-weight: 700; color: var(--text); }
+.daily-usage .du-remain { margin-left: auto; }
+.daily-usage.warn #dailyUsageText { color: #d97706; }
+.daily-usage.hit #dailyUsageText { color: var(--error); }
+.daily-limit-banner {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(185, 28, 28, 0.12);
+  border: 1px solid rgba(185, 28, 28, 0.45);
+  color: #b91c1c;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 /* 轻提示 toast */
 .toast {
   position: fixed;

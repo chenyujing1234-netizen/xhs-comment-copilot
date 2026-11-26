@@ -118,6 +118,104 @@ class ProductSyncReport(BaseModel):
     products: list = []
 
 
+class LeadReport(BaseModel):
+    """潜在客户上报：评论获客流程中 AI 判为感兴趣的用户。
+
+    同一 (phone, product_name, user_key) 重复上报走 upsert 合并：
+    - 触达动作 replied/dmed 按 OR 合并，不会被清零；
+    - 人工维护的 status / note 不会被插件上报覆盖。
+    仅上报动作（如回复/私信成功）时也调用本接口，只带 replied/dmed 标志。
+    """
+    phone: str
+    product_name: str = ''
+    user_id: str = ''
+    user_name: str = ''
+    user_url: str = ''
+    note_id: str = ''
+    note_url: str = ''
+    note_title: str = ''
+    keyword: str = ''
+    comment_content: str = ''
+    interest_reason: str = ''
+    source: str = 'comment'
+    replied: bool = False
+    dmed: bool = False
+
+
+class LeadUpdate(BaseModel):
+    """看板人工维护：更新跟进状态 / 备注。"""
+    id: int
+    status: str = ''
+    note: str = ''
+
+
+def lead_row_to_dict(row):
+    return {
+        'id': row['id'],
+        'phone': row['phone'],
+        'product_name': row['product_name'] or '',
+        'user_id': row['user_id'] or '',
+        'user_name': row['user_name'] or '',
+        'user_url': row['user_url'] or '',
+        'note_id': row['note_id'] or '',
+        'note_url': row['note_url'] or '',
+        'note_title': row['note_title'] or '',
+        'keyword': row['keyword'] or '',
+        'comment_content': row['comment_content'] or '',
+        'interest_reason': row['interest_reason'] or '',
+        'source': row['source'] or '',
+        'replied': bool(row['replied']),
+        'dmed': bool(row['dmed']),
+        'status': row['status'] or 'new',
+        'note': row['note'] or '',
+        'created_at': fmt_dt(row['created_at']),
+        'updated_at': fmt_dt(row['updated_at']),
+    }
+
+
+def compute_user_key(user_id, user_url, user_name):
+    """去重键：优先 user_id，退化为 user_url，再退化为 user_name。"""
+    for v in (user_id, user_url, user_name):
+        v = (v or '').strip()
+        if v:
+            return v[:300]
+    return ''
+
+
+class ActionReport(BaseModel):
+    """出站动作流水：评论/回复/私信/关注/分享，用于每日发送上限计数。"""
+    phone: str
+    action_type: str          # comment / reply / dm / follow / share
+    note_id: str = ''
+    target_user_id: str = ''
+    ok: bool = True
+
+
+def today_action_counts(cur, phone=None):
+    """今日（服务端日期）已成功动作数，按类型分组；phone 为空则统计全部手机号。"""
+    if phone:
+        cur.execute(
+            "SELECT action_type, COUNT(*) AS c FROM action_logs "
+            "WHERE phone = %s AND ok = 1 AND created_at >= CURDATE() GROUP BY action_type",
+            (phone,),
+        )
+    else:
+        cur.execute(
+            "SELECT action_type, COUNT(*) AS c FROM action_logs "
+            "WHERE ok = 1 AND created_at >= CURDATE() GROUP BY action_type",
+        )
+    return {row['action_type']: int(row['c']) for row in cur.fetchall()}
+
+
+def today_action_by_phone(cur):
+    """今日各手机号的成功动作总数。"""
+    cur.execute(
+        "SELECT phone, COUNT(*) AS c FROM action_logs "
+        "WHERE ok = 1 AND created_at >= CURDATE() GROUP BY phone"
+    )
+    return {row['phone']: int(row['c']) for row in cur.fetchall()}
+
+
 def upsert_device(conn, phone):
     with conn.cursor() as cur:
         cur.execute(
@@ -372,6 +470,172 @@ def report_dm(data: DMReport):
     return {'ok': True}
 
 
+@app.post('/api/report/lead', dependencies=[Depends(check_api_key)])
+def report_lead(data: LeadReport):
+    """潜在客户上报（upsert 合并）。"""
+    phone = data.phone.strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail='phone required')
+    product_name = (data.product_name or '')[:128]
+    user_id = (data.user_id or '')[:64]
+    user_url = (data.user_url or '')[:500]
+    user_name = (data.user_name or '')[:64]
+    user_key = compute_user_key(user_id, user_url, user_name)
+    now = now_str()
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                'INSERT INTO leads '
+                '(phone, product_name, user_key, user_id, user_name, user_url, '
+                'note_id, note_url, note_title, keyword, comment_content, interest_reason, source, '
+                'replied, dmed, status, created_at, updated_at) '
+                'VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) '
+                'ON DUPLICATE KEY UPDATE '
+                'user_id = IF(VALUES(user_id) <> \'\', VALUES(user_id), user_id), '
+                'user_name = IF(VALUES(user_name) <> \'\', VALUES(user_name), user_name), '
+                'user_url = IF(VALUES(user_url) <> \'\', VALUES(user_url), user_url), '
+                'note_id = IF(VALUES(note_id) <> \'\', VALUES(note_id), note_id), '
+                'note_url = IF(VALUES(note_url) <> \'\', VALUES(note_url), note_url), '
+                'note_title = IF(VALUES(note_title) <> \'\', VALUES(note_title), note_title), '
+                'keyword = IF(VALUES(keyword) <> \'\', VALUES(keyword), keyword), '
+                'comment_content = IF(VALUES(comment_content) <> \'\', VALUES(comment_content), comment_content), '
+                'interest_reason = IF(VALUES(interest_reason) <> \'\', VALUES(interest_reason), interest_reason), '
+                'source = IF(VALUES(source) <> \'\', VALUES(source), source), '
+                'replied = GREATEST(replied, VALUES(replied)), '
+                'dmed = GREATEST(dmed, VALUES(dmed)), '
+                'updated_at = VALUES(updated_at)',
+                (
+                    phone, product_name, user_key, user_id, user_name, user_url,
+                    (data.note_id or '')[:64], (data.note_url or '')[:500], (data.note_title or '')[:255],
+                    (data.keyword or '')[:64], (data.comment_content or '')[:500],
+                    (data.interest_reason or '')[:500], (data.source or 'comment')[:20],
+                    1 if data.replied else 0, 1 if data.dmed else 0,
+                    'new', now, now,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return {'ok': True}
+
+
+@app.post('/api/report/action', dependencies=[Depends(check_api_key)])
+def report_action(data: ActionReport):
+    """上报一条出站动作（评论/回复/私信/关注/分享），用于每日上限计数。"""
+    phone = data.phone.strip()
+    if not phone:
+        raise HTTPException(status_code=400, detail='phone required')
+    action_type = (data.action_type or '').strip()[:20]
+    if not action_type:
+        raise HTTPException(status_code=400, detail='action_type required')
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                'INSERT INTO action_logs (phone, action_type, note_id, target_user_id, ok, created_at) '
+                'VALUES (%s,%s,%s,%s,%s,%s)',
+                (
+                    phone, action_type,
+                    (data.note_id or '')[:64], (data.target_user_id or '')[:64],
+                    1 if data.ok else 0, now_str(),
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return {'ok': True}
+
+
+@app.get('/api/quota', dependencies=[Depends(check_api_key)])
+def get_quota(phone: str = Query(default='')):
+    """查询某手机号今日已成功发送的出站动作总数（按类型分组）。"""
+    if not phone:
+        raise HTTPException(status_code=400, detail='phone required')
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            counts = today_action_counts(cur, phone)
+            today_total = sum(counts.values())
+            cur.execute('SELECT CURDATE() AS d')
+            date_row = cur.fetchone() or {}
+    finally:
+        conn.close()
+    return {
+        'ok': True,
+        'phone': phone,
+        'date': str(date_row.get('d')) if date_row.get('d') is not None else '',
+        'today_total': today_total,
+        'by_type': counts,
+    }
+
+
+def _check_key(key):
+    if key != API_KEY:
+        raise HTTPException(status_code=401, detail='invalid key')
+
+
+@app.get('/api/leads')
+def get_leads(key: str = Query(default=''), product: str = Query(default=''),
+              status: str = Query(default=''), phone: str = Query(default=''),
+              limit: int = Query(default=500, ge=1, le=1000)):
+    """看板查询潜在客户：可按产品 / 状态 / 手机号过滤。"""
+    _check_key(key)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            where = []
+            params = []
+            if product:
+                where.append('product_name = %s')
+                params.append(product)
+            if status:
+                where.append('status = %s')
+                params.append(status)
+            if phone:
+                where.append('phone = %s')
+                params.append(phone)
+            sql = ('SELECT id, phone, product_name, user_key, user_id, user_name, user_url, '
+                   'note_id, note_url, note_title, keyword, comment_content, interest_reason, source, '
+                   'replied, dmed, status, note, created_at, updated_at FROM leads')
+            if where:
+                sql += ' WHERE ' + ' AND '.join(where)
+            sql += ' ORDER BY updated_at DESC, id DESC LIMIT %s'
+            params.append(limit)
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            leads = [lead_row_to_dict(r) for r in rows]
+            # 同时返回当前过滤范围内的状态分布
+            cur.execute(
+                'SELECT status, COUNT(*) AS c FROM leads' +
+                (' WHERE ' + ' AND '.join(where) if where else '') +
+                ' GROUP BY status',
+                params[:-1] if where else [],
+            )
+            status_counts = {row['status'] or 'new': int(row['c']) for row in cur.fetchall()}
+    finally:
+        conn.close()
+    return {'ok': True, 'leads': leads, 'status_counts': status_counts}
+
+
+@app.post('/api/lead/update')
+def update_lead(data: LeadUpdate, key: str = Query(default='')):
+    """看板人工维护：更新跟进状态 / 备注。"""
+    _check_key(key)
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                'UPDATE leads SET status = %s, note = %s, updated_at = %s WHERE id = %s',
+                ((data.status or 'new')[:32], data.note, now_str(), data.id),
+            )
+            affected = cur.rowcount
+        conn.commit()
+    finally:
+        conn.close()
+    return {'ok': True, 'affected': affected}
+
+
 # ===== 看板数据接口 =====
 def count_rows(cur, table, cond=''):
     cur.execute('SELECT COUNT(*) AS c, COALESCE(SUM(ok), 0) AS s FROM ' + table + ' ' + cond)
@@ -427,7 +691,8 @@ def dashboard(key: str = Query(default='')):
             )
             by_keyword = [{'name': row['keyword'] or '(未知)', 'count': int(row['c'])} for row in cur.fetchall()]
 
-            # 客户端
+            # 客户端（含今日已发出站动作数，用于每日上限看板）
+            outbound_by_phone = today_action_by_phone(cur)
             cur.execute('SELECT phone, first_seen, last_seen, login_count FROM devices ORDER BY last_seen DESC')
             devices = [
                 {
@@ -435,9 +700,11 @@ def dashboard(key: str = Query(default='')):
                     'first_seen': fmt_dt(row['first_seen']),
                     'last_seen': fmt_dt(row['last_seen']),
                     'login_count': int(row['login_count'] or 0),
+                    'today_outbound': outbound_by_phone.get(row['phone'], 0),
                 }
                 for row in cur.fetchall()
             ]
+            outbound_today = sum(outbound_by_phone.values())
 
             # 产品库（各客户端在产品页维护的产品信息）
             cur.execute(
@@ -535,6 +802,26 @@ def dashboard(key: str = Query(default='')):
                 }
                 for row in cur.fetchall()
             ]
+
+            # 潜在客户：汇总 + 按产品分布 + 最近 200 条
+            cur.execute('SELECT COUNT(*) AS c FROM leads')
+            lead_total = int((cur.fetchone() or {}).get('c') or 0)
+            cur.execute('SELECT status, COUNT(*) AS c FROM leads GROUP BY status')
+            lead_status_counts = {row['status'] or 'new': int(row['c']) for row in cur.fetchall()}
+            cur.execute(
+                'SELECT product_name, COUNT(*) AS c FROM leads GROUP BY product_name ORDER BY c DESC'
+            )
+            leads_by_product = [
+                {'name': row['product_name'] or '(未知)', 'count': int(row['c'])}
+                for row in cur.fetchall()
+            ]
+            cur.execute(
+                'SELECT id, phone, product_name, user_key, user_id, user_name, user_url, '
+                'note_id, note_url, note_title, keyword, comment_content, interest_reason, source, '
+                'replied, dmed, status, note, created_at, updated_at '
+                'FROM leads ORDER BY updated_at DESC, id DESC LIMIT 200'
+            )
+            leads = [lead_row_to_dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
 
@@ -550,9 +837,12 @@ def dashboard(key: str = Query(default='')):
             'comment_today': c_today,
             'reply_today': r_today,
             'dm_today': d_today,
+            'outbound_today': outbound_today,
             'device_count': len(devices),
             'product_count': len(products),
             'running_runs': sum(1 for r in runs if r['status'] == 'running'),
+            'lead_count': lead_total,
+            'lead_new': lead_status_counts.get('new', 0),
         },
         'trend': trend,
         'by_product': by_product,
@@ -562,6 +852,9 @@ def dashboard(key: str = Query(default='')):
         'runs': runs,
         'comments': comments,
         'replies': replies,
+        'leads': leads,
+        'leads_by_product': leads_by_product,
+        'lead_status_counts': lead_status_counts,
         'dms': dms,
     }
 

@@ -73,6 +73,22 @@
   .rank .cnt { width: 34px; text-align: right; font-size: 12px; color: #64748b; }
   .err-box { background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; padding: 12px 16px; border-radius: 10px; margin: 16px; }
   .loading { text-align: center; color: #8a919f; padding: 40px 0; }
+  /* 潜在客户面板 */
+  .lead-filter { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+  .lead-filter label { font-size: 12px; color: #64748b; }
+  .lead-filter select { padding: 4px 8px; border: 1px solid #e5e7eb; border-radius: 6px; font-size: 12px; background: #fff; }
+  .lead-filter .cnt { font-size: 12px; color: #8a919f; margin-left: auto; }
+  .lead-filter button { padding: 4px 12px; border: 1px solid #e5e7eb; border-radius: 6px; font-size: 12px; background: #fff; cursor: pointer; }
+  .lead-filter button:hover { border-color: #ff2442; color: #ff2442; }
+  .lead-note { width: 100%; min-height: 34px; max-height: 160px; resize: vertical; border: 1px solid #e5e7eb; border-radius: 6px; padding: 5px 7px; font-family: inherit; font-size: 12px; color: #1f2329; background: #fff; }
+  .lead-note:focus { outline: none; border-color: #ff2442; }
+  .lead-status { padding: 3px 6px; border: 1px solid #e5e7eb; border-radius: 6px; font-size: 12px; background: #fff; }
+  .lead-save { padding: 3px 10px; border: 1px solid #ff2442; color: #ff2442; border-radius: 6px; font-size: 12px; background: #fff; cursor: pointer; white-space: nowrap; }
+  .lead-save:hover { background: #ff2442; color: #fff; }
+  .lead-save.saved { border-color: #15803d; color: #15803d; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; margin-right: 3px; white-space: nowrap; }
+  .badge.r { background: #dbeafe; color: #1d4ed8; }
+  .badge.d { background: #dcfce7; color: #15803d; }
 </style>
 </head>
 <body>
@@ -87,14 +103,27 @@
   </div>
 </div>
 
+<div class="wrap" id="leadsWrap"></div>
 <div class="wrap" id="app"><div class="loading">加载中…</div></div>
 
 <script>
 (function () {
   var app = document.getElementById('app');
+  var leadsWrap = document.getElementById('leadsWrap');
   var params = new URLSearchParams(location.search);
   var key = params.get('key') || localStorage.getItem('xhs_report_key') || '';
   if (params.get('key')) localStorage.setItem('xhs_report_key', key);
+
+  // 潜在客户跟进状态（人工维护，可在看板编辑）
+  var LEAD_STATUSES = [
+    { v: 'new', label: '新客户' },
+    { v: 'contacted', label: '已联系' },
+    { v: 'following_up', label: '跟进中' },
+    { v: 'converted', label: '已转化' },
+    { v: 'invalid', label: '无意向' },
+    { v: 'closed', label: '已关闭' }
+  ];
+  var leadState = { all: [], shown: [], products: [], product: '', status: '' };
 
   function esc(s) {
     return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
@@ -162,12 +191,14 @@
       card('今日评论', s.comment_today, true) +
       card('今日回复', s.reply_today, true) +
       card('今日私信', s.dm_today, true) +
+      card('今日出站', s.outbound_today, '含关注/分享') +
       card('累计评论', s.comment_total, '成功 ' + s.comment_ok) +
       card('累计回复', s.reply_total, '成功 ' + s.reply_ok) +
       card('累计私信', s.dm_total, '成功 ' + s.dm_ok) +
       card('客户端（手机号）', s.device_count) +
       card('产品库', s.product_count) +
       card('运行中任务', s.running_runs) +
+      card('潜在客户', s.lead_count, '新增 ' + s.lead_new) +
       '</div>';
 
     // 趋势
@@ -239,10 +270,10 @@
 
     // 客户端
     html += '<div class="panel"><h2>客户端列表</h2><table><tr>' +
-      '<th>手机号</th><th>首次出现</th><th>最近活跃</th><th>登录次数</th></tr>' +
+      '<th>手机号</th><th>首次出现</th><th>最近活跃</th><th>今日出站</th><th>登录次数</th></tr>' +
       d.devices.map(function (v) {
         return '<tr><td>' + esc(v.phone) + '</td><td class="muted">' + esc(v.first_seen) + '</td>' +
-          '<td class="muted">' + esc(v.last_seen) + '</td><td>' + v.login_count + '</td></tr>';
+          '<td class="muted">' + esc(v.last_seen) + '</td><td>' + (v.today_outbound || 0) + '</td><td>' + v.login_count + '</td></tr>';
       }).join('') + '</table></div>';
 
     app.innerHTML = html;
@@ -254,9 +285,158 @@
       '<div class="value">' + value + (small ? '<small>' + esc(small) + '</small>' : '') + '</div></div>';
   }
 
+  // ===== 潜在客户：展示 + 按产品筛选 + 可编辑跟进状态/备注 =====
+  function isLeadEditing() {
+    var el = document.activeElement;
+    return !!(el && el.closest && el.closest('#leadsWrap') &&
+      (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'SELECT'));
+  }
+  function filterLeads(list, status) {
+    if (!status) return list || [];
+    return (list || []).filter(function (l) { return (l.status || 'new') === status; });
+  }
+  function leadRowHtml(l) {
+    var actionBadges = '';
+    if (l.replied) actionBadges += '<span class="badge r">已回复</span>';
+    if (l.dmed) actionBadges += '<span class="badge d">已私信</span>';
+    if (!actionBadges) actionBadges = '<span class="muted">-</span>';
+    var stSel = '<select class="lead-status" data-lead-status-select data-id="' + l.id + '">' +
+      LEAD_STATUSES.map(function (s) {
+        return '<option value="' + s.v + '"' + ((l.status || 'new') === s.v ? ' selected' : '') + '>' + s.label + '</option>';
+      }).join('') + '</select>';
+    return '<tr data-lead-row="' + l.id + '">' +
+      '<td>' + esc(l.phone) + '</td>' +
+      '<td>' + esc(l.product_name) + '</td>' +
+      '<td>' + link(l.user_url, l.user_name || l.user_id || '用户') +
+        '<div class="muted" style="font-size:11px" title="' + esc(l.user_id) + '">' + esc((l.user_id || '').slice(0, 10)) + '</div></td>' +
+      '<td>' + link(l.note_url, l.note_title || '链接') + '<div class="muted">' + esc(l.keyword || '-') + '</div></td>' +
+      '<td>' + txtBox(l.comment_content, 'lc' + l.id) + '</td>' +
+      '<td>' + txtBox(l.interest_reason, 'lr' + l.id) + '</td>' +
+      '<td>' + actionBadges + '</td>' +
+      '<td>' + stSel + '</td>' +
+      '<td><textarea class="lead-note" data-lead-note data-id="' + l.id + '" rows="2" placeholder="跟进备注…">' + esc(l.note) + '</textarea></td>' +
+      '<td><button type="button" class="lead-save" data-lead-save data-id="' + l.id + '">保存</button>' +
+        '<div class="muted" style="font-size:11px;margin-top:3px">' + esc(l.updated_at || '') + '</div></td>' +
+      '</tr>';
+  }
+  function leadsTableBodyHtml() {
+    var shown = leadState.shown || [];
+    var head = '<tr><th>手机号</th><th>产品</th><th>用户</th><th>来源笔记 / 关键词</th>' +
+      '<th>对方评论</th><th>判定理由</th><th>触达</th><th>跟进状态</th><th>备注</th><th>操作</th></tr>';
+    var rows = shown.length ? shown.map(leadRowHtml).join('') :
+      '<tr><td colspan="10" class="muted" style="text-align:center;padding:24px">暂无潜在客户。在插件「评论获客」流程中识别到感兴趣用户后会自动出现在这里。</td></tr>';
+    return head + rows;
+  }
+  function leadsPanelHtml() {
+    var prods = leadState.products || [];
+    var prodOpts = '<option value="">全部产品</option>' + prods.map(function (p) {
+      return '<option value="' + esc(p.name) + '"' + (leadState.product === p.name ? ' selected' : '') + '>' + esc(p.name) + '（' + p.count + '）</option>';
+    }).join('');
+    // 当前选中的产品可能暂未出现在看板统计里（例如刚上报），补一个选项避免丢选
+    if (leadState.product && prods.every(function (p) { return p.name !== leadState.product; })) {
+      prodOpts += '<option value="' + esc(leadState.product) + '" selected>' + esc(leadState.product) + '</option>';
+    }
+    var stOpts = '<option value="">全部状态</option>' + LEAD_STATUSES.map(function (s) {
+      return '<option value="' + s.v + '"' + (leadState.status === s.v ? ' selected' : '') + '>' + s.label + '</option>';
+    }).join('');
+    var cnt = (leadState.shown || []).length;
+    return '<div class="panel" id="leadsPanel"><h2>潜在客户（按产品维护跟进）</h2>' +
+      '<div class="lead-filter">' +
+      '<label>产品 <select data-lead-product>' + prodOpts + '</select></label>' +
+      '<label>状态 <select data-lead-status>' + stOpts + '</select></label>' +
+      '<button type="button" data-lead-refresh>刷新</button>' +
+      '<span class="cnt">共 ' + cnt + ' 条' + (leadState.product ? ' · ' + esc(leadState.product) : '') + '</span>' +
+      '</div>' +
+      '<table>' + leadsTableBodyHtml() + '</table></div>';
+  }
+  function rerenderLeadsTable() {
+    // 只替换表格，保留筛选条，减少闪烁
+    var panel = document.getElementById('leadsPanel');
+    if (!panel) return;
+    var oldTable = panel.querySelector('table');
+    var wrap = document.createElement('div');
+    wrap.innerHTML = '<table>' + leadsTableBodyHtml() + '</table>';
+    if (oldTable) panel.replaceChild(wrap.firstChild, oldTable);
+    else panel.appendChild(wrap.firstChild);
+    var cnt = panel.querySelector('.lead-filter .cnt');
+    if (cnt) cnt.textContent = '共 ' + (leadState.shown || []).length + ' 条' + (leadState.product ? ' · ' + leadState.product : '');
+  }
+  function refreshLeads(d) {
+    if (d) {
+      leadState.products = d.leads_by_product || [];
+      if (!isLeadEditing()) {
+        leadState.all = d.leads || [];
+        if (!leadState.product) leadState.shown = filterLeads(leadState.all, leadState.status);
+      }
+    }
+    if (!leadsWrap) return;
+    if (isLeadEditing()) return; // 编辑中不重绘，避免丢失未保存的备注
+    leadsWrap.innerHTML = leadsPanelHtml();
+  }
+  function applyLeadFilters() {
+    var product = leadState.product;
+    var status = leadState.status;
+    if (product) {
+      // 选定具体产品时走服务端查询，返回该产品全量（最多 500），避免看板快照只给跨产品最新 200
+      var url = 'api/leads?key=' + encodeURIComponent(key) + '&product=' + encodeURIComponent(product);
+      if (status) url += '&status=' + encodeURIComponent(status);
+      fetch(url).then(function (r) { return r.json(); }).then(function (j) {
+        if (j && j.ok) { leadState.shown = j.leads || []; rerenderLeadsTable(); }
+      });
+    } else {
+      leadState.shown = filterLeads(leadState.all, status);
+      rerenderLeadsTable();
+    }
+  }
+  function saveLead(id) {
+    var row = document.querySelector('[data-lead-row="' + id + '"]');
+    if (!row) return;
+    var sel = row.querySelector('[data-lead-status-select]');
+    var ta = row.querySelector('[data-lead-note]');
+    var btn = row.querySelector('[data-lead-save]');
+    var status = sel ? sel.value : 'new';
+    var note = ta ? ta.value : '';
+    btn.textContent = '保存中…';
+    btn.disabled = true;
+    fetch('api/lead/update?key=' + encodeURIComponent(key), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: Number(id), status: status, note: note })
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      if (j && j.ok) {
+        [leadState.shown, leadState.all].forEach(function (arr) {
+          for (var i = 0; i < arr.length; i++) {
+            if (String(arr[i].id) === String(id)) { arr[i].status = status; arr[i].note = note; break; }
+          }
+        });
+        btn.textContent = '已保存';
+        btn.classList.add('saved');
+        setTimeout(function () { btn.textContent = '保存'; btn.classList.remove('saved'); btn.disabled = false; }, 1500);
+      } else {
+        btn.textContent = '失败';
+        setTimeout(function () { btn.textContent = '保存'; btn.disabled = false; }, 1500);
+      }
+    }).catch(function () {
+      btn.textContent = '失败';
+      setTimeout(function () { btn.textContent = '保存'; btn.disabled = false; }, 1500);
+    });
+  }
+  if (leadsWrap) {
+    leadsWrap.addEventListener('change', function (e) {
+      var t = e.target;
+      if (t.matches('[data-lead-product]')) { leadState.product = t.value; applyLeadFilters(); }
+      else if (t.matches('[data-lead-status]')) { leadState.status = t.value; applyLeadFilters(); }
+    });
+    leadsWrap.addEventListener('click', function (e) {
+      var t = e.target;
+      if (t.matches('[data-lead-save]')) { saveLead(t.getAttribute('data-id')); }
+      else if (t.matches('[data-lead-refresh]')) { load(); }
+    });
+  }
+
   function load() {
     if (!key) {
-      app.innerHTML = '<div class="err-box">缺少访问密钥。请在链接中带上 <b>?key=你的密钥</b> 打开本页面，例如：<br>http://124.221.115.174/xhs-report/?key=xhs-report-2026</div>';
+      app.innerHTML = '<div class="err-box">缺少访问密钥。请在链接中带上 <b>?key=你的密钥</b> 打开本页面，例如：<br>https://linkpal.cloud/xhs-report/?key=xhs-report-2026</div>';
       return;
     }
     fetch('api/dashboard?key=' + encodeURIComponent(key))
@@ -267,6 +447,7 @@
           return;
         }
         render(res.body);
+        refreshLeads(res.body);
       })
       .catch(function (e) {
         app.innerHTML = '<div class="err-box">请求失败：' + esc(e.message) + '</div>';

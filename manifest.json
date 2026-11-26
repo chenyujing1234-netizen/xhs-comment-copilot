@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "小红书评论获客助手",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "通过在小红书相关视频下发布拟人化评论，引导潜在客户主动联系你了解产品。",
   "minimum_chrome_version": "114",
   "icons": {
@@ -23,7 +23,7 @@
     "https://token-plan.cn-beijing.maas.aliyuncs.com/*",
     "https://dysmsapi.aliyuncs.com/*",
     "https://api.openai.com/*",
-    "http://124.221.115.174/*"
+    "https://linkpal.cloud/*"
   ],
   "background": {
     "service_worker": "background.js"

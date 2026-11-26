@@ -492,6 +492,404 @@
     };
   }
 
+  // ===== 视频推广：关注用户 / 分享视频给用户 =====
+
+  function findShareButton() {
+    const cands = [
+      document.querySelector('[class*="share"]'),
+      document.querySelector('[aria-label*="分享"]'),
+      document.querySelector('[title*="分享"]'),
+      document.querySelector('[data-e2e*="share"]')
+    ];
+    for (const c of cands) {
+      if (!c) continue;
+      const t = (c.innerText || c.textContent || '').trim();
+      if (t && t.length > 8) continue; // 排除大段文字的元素
+      return c;
+    }
+    return null;
+  }
+
+  function findSharePanel() {
+    const sels = [
+      '.xhs-note-share-popup-container', '.xhs-note-share-popup', '[class*="xhs-note-share-popup"]',
+      '[class*="share-panel"]', '[class*="sharePanel"]', '[class*="share-container"]',
+      '[class*="shareContainer"]', '[role="dialog"]', '.modal', '[class*="popup"]'
+    ];
+    for (const s of sels) {
+      const el = document.querySelector(s);
+      if (el && el.getBoundingClientRect().width > 0) return el;
+    }
+    return null;
+  }
+
+  // 转储容器内可点击元素的文本（诊断分享面板结构用）
+  function dumpClickableTexts(scope) {
+    const out = [];
+    const els = (scope || document).querySelectorAll('button, [role="button"], a, span, div, li');
+    for (const el of els) {
+      const t = (el.innerText || '').trim();
+      if (!t || t.length > 24) continue;
+      if (out.some((x) => x.text === t)) continue;
+      out.push({ text: t, cls: (el.getAttribute('class') || '').slice(0, 50), tag: el.tagName });
+      if (out.length >= 40) break;
+    }
+    return out;
+  }
+
+  // 收集所有"可能是分享按钮"的候选（可见、含分享语义）
+  function collectShareCandidates() {
+    const seen = new Set();
+    const out = [];
+    const pushEl = (el) => {
+      if (!el || seen.has(el)) return;
+      const r = el.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return;
+      const st = getComputedStyle(el);
+      if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return;
+      seen.add(el);
+      out.push({
+        el,
+        tag: el.tagName,
+        cls: (el.getAttribute('class') || '').slice(0, 80),
+        text: (el.innerText || el.textContent || '').trim().slice(0, 30),
+        aria: el.getAttribute('aria-label') || el.getAttribute('title') || '',
+        rect: { x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height) }
+      });
+    };
+    document.querySelectorAll('[class*="share"], [aria-label*="分享"], [title*="分享"], [data-e2e*="share"], [data-testid*="share"]').forEach(pushEl);
+    document.querySelectorAll('button, [role="button"], a').forEach((el) => {
+      const t = (el.innerText || '').trim();
+      if (t && t.length <= 6 && /分享/.test(t)) pushEl(el);
+    });
+    return out;
+  }
+
+  // 页面短文本快照（用于 diff 点击前后变化）
+  function snapshotTexts() {
+    const set = new Set();
+    document.querySelectorAll('button, [role="button"], a, span, div, li, p').forEach((el) => {
+      const t = (el.innerText || '').trim();
+      if (t && t.length <= 40) set.add(t);
+    });
+    return set;
+  }
+
+  // 浮层签名（cls + 文本前缀），用于点击前后 diff，排除页面原有元素
+  function overlaySig(el) {
+    const t = (el.innerText || '').trim().slice(0, 40);
+    return (el.className || '').toString().slice(0, 40) + '|' + t;
+  }
+  function snapshotOverlaySigs() {
+    const set = new Set();
+    document.querySelectorAll('div, section, ul').forEach((el) => {
+      const st = getComputedStyle(el);
+      if (st.position !== 'fixed' && st.position !== 'absolute') return;
+      set.add(overlaySig(el));
+    });
+    return set;
+  }
+
+  // 分享面板特征文本命中检测（强判据）
+  function sharePanelSignatures() {
+    const sigs = ['分享至', '私信好友', '扫码分享', '微信', '朋友圈', 'QQ空间', 'QQ', '微博', '复制链接', '私信', '发给好友', '分享给好友', '分享链接', '生成海报', '更多分享', '生成图片'];
+    const body = document.body.innerText || '';
+    return sigs.filter((s) => body.indexOf(s) !== -1);
+  }
+
+  // 浮层内可交互项（含 icon-only：看 aria/title/svg）
+  function overlayItems(el) {
+    const items = [];
+    el.querySelectorAll('button, [role="button"], a, [class*="item"], [class*="icon"], svg').forEach((n) => {
+      const r = n.getBoundingClientRect();
+      if (r.width === 0 || r.height === 0) return;
+      const text = (n.innerText || '').trim().slice(0, 20);
+      const aria = n.getAttribute('aria-label') || n.getAttribute('title') || '';
+      const cls = (n.className || '').toString().slice(0, 50);
+      if (!text && !aria && !cls) return;
+      if (items.some((x) => x.text === text && x.aria === aria && x.cls === cls)) return;
+      items.push({ tag: n.tagName, text, aria, cls });
+    });
+    return items.slice(0, 30);
+  }
+
+  // 扫描"新出现"的浮层：fixed/absolute 且签名不在 before 集合里（排除页面原有元素），返回含 outerHTML 摘要的铁证
+  function scanNewOverlays(beforeSigs) {
+    const out = [];
+    document.querySelectorAll('div, section, ul').forEach((el) => {
+      const st = getComputedStyle(el);
+      if (st.position !== 'fixed' && st.position !== 'absolute') return;
+      const r = el.getBoundingClientRect();
+      if (r.width < 60 || r.height < 60) return;
+      if (beforeSigs.has(overlaySig(el))) return; // 页面原有，跳过（修复 note-item 假阳性）
+      const t = (el.innerText || '').trim();
+      out.push({
+        text: t.slice(0, 200),
+        cls: (el.className || '').toString().slice(0, 60),
+        pos: st.position,
+        items: overlayItems(el),
+        html: (el.outerHTML || '').slice(0, 800)
+      });
+    });
+    return out;
+  }
+
+  // 只读探测：逐个尝试全部候选分享按钮，用"点击前后 diff"判断面板是否出现，绝不点发送
+  async function probeSharePanel() {
+    const cands = collectShareCandidates();
+    const tried = [];
+
+    // 全部尝试（不再提前停），每个都记录证据
+    for (let i = 0; i < cands.length && i < 6; i++) {
+      const c = cands[i];
+      const beforeTexts = snapshotTexts();
+      const beforeOverlays = snapshotOverlaySigs();
+      let clicked = false, errMsg = '';
+      try {
+        c.el.scrollIntoView({ block: 'center', behavior: 'instant' });
+        await sleep(rnd(300, 500));
+        c.el.click();
+        clicked = true;
+      } catch (e) { errMsg = e.message; }
+      await sleep(rnd(3000, 3800)); // 给面板渲染留足时间
+      const afterTexts = snapshotTexts();
+      const newTexts = [...afterTexts].filter((t) => !beforeTexts.has(t));
+      const sigs = sharePanelSignatures();
+      const newOverlays = scanNewOverlays(beforeOverlays);
+      tried.push({
+        cls: c.cls, text: c.text, aria: c.aria, rect: c.rect,
+        clicked, err: errMsg,
+        newTexts: newTexts.slice(0, 30), sigs,
+        overlayCount: newOverlays.length,
+        overlays: newOverlays.slice(0, 4)
+      });
+    }
+
+    // 选最可能命中的候选：特征文本优先，其次新浮层
+    let bestIdx = -1, bestScore = -1;
+    tried.forEach((t, i) => {
+      const score = t.sigs.length * 100 + t.overlayCount * 10;
+      if (score > bestScore) { bestScore = score; bestIdx = i; }
+    });
+    const effective = bestIdx >= 0 && bestScore > 0 ? tried[bestIdx] : null;
+
+    let panelInfo = null;
+    if (effective && effective.overlayCount > 0 && effective.overlays.length > 0) {
+      const ov = effective.overlays[0];
+      panelInfo = { found: true, cls: ov.cls, items: ov.items || [], html: ov.html };
+    }
+
+    // 关闭可能残留的面板（仅点遮罩/发 Esc，不点任何发送）
+    try {
+      const mask = document.querySelector('[class*="mask"], [class*="overlay"]');
+      if (mask) mask.click();
+      await sleep(200);
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    } catch (e) {}
+
+    // 兼容旧字段 + 新诊断字段
+    return {
+      ok: true,
+      candidateCount: cands.length,
+      tried,
+      effective,
+      panelFound: !!(panelInfo && panelInfo.found),
+      panelCls: panelInfo ? panelInfo.cls : '',
+      items: panelInfo ? panelInfo.items : [],
+      panelInfo
+    };
+  }
+
+  // 用户主页：关注用户；已关注/互关 则返回已关注
+  async function followUser() {
+    if (location.pathname.indexOf('/user/profile') !== 0) {
+      return { ok: false, error: '不在用户主页：' + location.pathname };
+    }
+    let followBtn = null;
+    let state = 'unknown';
+    for (let i = 0; i < 12; i++) {
+      const btns = document.querySelectorAll('button, [role="button"], a, span, div');
+      for (const b of btns) {
+        const t = (b.innerText || '').trim();
+        if (t === '已关注' || t === '互相关注' || t === '回关') { state = 'followed'; if (!followBtn) followBtn = b; }
+        else if (t === '关注' || t === '+ 关注' || t === '关注TA' || t === '+关注') { state = 'not_followed'; followBtn = b; }
+      }
+      if (state !== 'unknown') break;
+      await sleep(rnd(500, 800));
+    }
+    if (state === 'followed') return { ok: true, alreadyFollowing: true };
+    if (!followBtn) return { ok: false, error: '未找到关注按钮，state=' + state };
+    followBtn.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    await sleep(rnd(400, 800));
+    followBtn.click();
+    await sleep(rnd(1500, 2500));
+    let after = 'unknown';
+    const btns2 = document.querySelectorAll('button, [role="button"], a, span, div');
+    for (const b of btns2) {
+      const t = (b.innerText || '').trim();
+      if (t === '已关注' || t === '互相关注' || t === '回关') { after = 'followed'; break; }
+    }
+    return { ok: after === 'followed', alreadyFollowing: false, state: after };
+  }
+
+  // 分享笔记给指定用户：走「分享按钮→分享至面板→私信好友→选人→发送」原生转发（发视频卡片，非文字）
+  // 等待元素出现（轮询，最多 timeout ms）
+  function waitForEl(selector, scope, timeout) {
+    return new Promise((resolve) => {
+      const root = scope || document;
+      const start = Date.now();
+      const to = timeout || 4000;
+      const tick = () => {
+        const el = root.querySelector(selector);
+        if (el && el.getBoundingClientRect().width > 0) return resolve(el);
+        if (Date.now() - start > to) return resolve(null);
+        setTimeout(tick, 200);
+      };
+      tick();
+    });
+  }
+
+  // 分享笔记给指定用户：走「分享按钮→分享至面板→私信好友→选人→发送」原生转发（发视频卡片，非文字）
+  // 所有选择器均来自小红书 Web 真实 DOM（已用浏览器实测验证）
+  async function shareNoteToUser(userId, userName, caption) {
+    if (!userId) return { ok: false, error: '缺少目标 userId' };
+
+    const setNativeValue = (el, val) => {
+      try {
+        const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value').set;
+        setter.call(el, val);
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      } catch (e) {
+        el.value = val;
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    };
+    const fail = (error, extra) => ({ ok: false, error, fallback: true, ...extra });
+
+    // ---- 1. 点击分享按钮，等待分享面板 ----
+    let shareBtn = document.querySelector('.share-icon-container, [class*="share-icon"]');
+    let candidateCount = 0;
+    if (!shareBtn) {
+      const cands = collectShareCandidates();
+      candidateCount = cands.length;
+      shareBtn = cands.length ? cands[0].el : null;
+    }
+    if (!shareBtn) return fail('未找到分享按钮', { panelFound: false, candidateCount });
+    const shareBtnInfo = 'cls=' + (shareBtn.className || '').toString().slice(0, 80);
+    try {
+      shareBtn.scrollIntoView({ block: 'center', behavior: 'instant' });
+      await sleep(rnd(300, 500));
+      shareBtn.click();
+    } catch (e) { return fail('点击分享按钮异常：' + e.message, { panelFound: false, shareBtnInfo }); }
+
+    const panel = await waitForEl('.xhs-note-share-popup-container, .xhs-note-share-popup, [class*="xhs-note-share-popup"]', document, 4500);
+    if (!panel) {
+      const sigs = sharePanelSignatures();
+      return fail('点击分享按钮后未出现分享面板', { panelFound: false, shareBtnInfo, candidateCount, sigs, probe: dumpClickableTexts(document) });
+    }
+    const diag = {
+      panelFound: true,
+      panelCls: (panel.className || '').toString().slice(0, 80),
+      panelText: (panel.innerText || '').slice(0, 300)
+    };
+
+    // ---- 2. 点击「私信好友」打开联系人选择对话框 ----
+    let dmItem = null;
+    panel.querySelectorAll('.xhs-note-share-popup-action-item, [class*="share-popup-action"]').forEach((it) => {
+      if (dmItem) return;
+      const label = it.querySelector('.xhs-note-share-popup-action-label, [class*="action-label"]') || it;
+      const t = (label.innerText || label.textContent || '').trim();
+      if (/私信好友|^私信$/.test(t)) dmItem = it;
+    });
+    if (!dmItem) return fail('分享面板未找到私信好友入口', { ...diag, probe: dumpClickableTexts(panel) });
+    try { dmItem.click(); } catch (e) { return fail('点击私信好友异常：' + e.message, { ...diag }); }
+    await sleep(rnd(1200, 1800));
+
+    // ---- 3. 等待转发对话框（联系人选择器）出现 ----
+    let dialog = await waitForEl('.xhs-note-forward-dialog, [class*="note-forward-dialog"]', document, 4500);
+    if (!dialog) dialog = document.querySelector('.reds-modal, [class*="reds-modal"]');
+    if (!dialog) return fail('点击私信好友后未出现联系人对话框', { ...diag, probe: dumpClickableTexts(document) });
+    const scope = dialog;
+    diag.dialogText = (scope.innerText || '').slice(0, 400);
+
+    // ---- 4. 选中目标用户 ----
+    let picked = false;
+    // 4a. 登录账号的对话框可能带搜索框（实测部分账号没有，兜底扫描）
+    const searchInput = scope.querySelector('input[placeholder], input[type="text"], input:not([type]), [contenteditable="true"]');
+    if (searchInput && userName) {
+      try {
+        searchInput.focus();
+        if (searchInput.tagName === 'INPUT' || searchInput.tagName === 'TEXTAREA') setNativeValue(searchInput, userName);
+        else searchInput.textContent = userName;
+        searchInput.dispatchEvent(new Event('input', { bubbles: true }));
+        await sleep(rnd(1200, 1800));
+      } catch (e) {}
+    }
+    // 4b. 扫描联系人列表，精确/包含匹配用户名
+    const pickByName = () => {
+      const names = scope.querySelectorAll('.xhs-im-forward-user-list-name, [class*="user-list-name"]');
+      for (const sp of names) {
+        const t = (sp.innerText || sp.textContent || '').trim();
+        if (!t) continue;
+        if (userName && (t === userName || t.indexOf(userName) !== -1 || userName.indexOf(t) !== -1)) {
+          const item = sp.closest('.xhs-im-forward-user-list-item, [class*="user-list-item"]') || sp;
+          item.click();
+          return true;
+        }
+      }
+      return false;
+    };
+    if (pickByName()) { picked = true; }
+    else {
+      // 滚动加载更多分组（最近聊天 / 互相关注 / 我关注的…）
+      const scroller = scope.querySelector('.xhs-note-forward-dialog-sticky-block, [class*="forward-dialog"]') || scope;
+      for (let s = 0; s < 6; s++) {
+        scroller.scrollTop = (scroller.scrollTop || 0) + 600;
+        await sleep(rnd(500, 800));
+        if (pickByName()) { picked = true; break; }
+      }
+    }
+    if (!picked) {
+      // 诊断：列出当前对话框里所有可见用户名，便于判断目标是否真的不在列表
+      const visible = [];
+      scope.querySelectorAll('.xhs-im-forward-user-list-name').forEach((sp) => {
+        const t = (sp.innerText || '').trim();
+        if (t && visible.length < 40) visible.push(t);
+      });
+      return fail('未在联系人列表找到目标用户：' + userName, {
+        ...diag, searchFound: !!searchInput, visibleNames: visible, probe: dumpClickableTexts(scope)
+      });
+    }
+    diag.pickedName = userName;
+    await sleep(rnd(500, 900));
+
+    // ---- 5. 填配文（如有） ----
+    if (caption) {
+      const capInput = scope.querySelector('textarea, input[placeholder*="说点"], input[placeholder*="留言"], input[placeholder*="私信"]');
+      if (capInput) {
+        capInput.focus();
+        setNativeValue(capInput, caption);
+        await sleep(rnd(400, 700));
+      }
+    }
+
+    // ---- 6. 点发送（实测：button.btn.submit.gray 文本「发送」） ----
+    let sent = false;
+    const sendBtn = scope.querySelector('button.btn.submit.gray, button.btn.submit');
+    if (sendBtn && /发送/.test((sendBtn.innerText || '').trim())) { sendBtn.click(); sent = true; }
+    if (!sent) {
+      const all = scope.querySelectorAll('button, [role="button"], a');
+      for (const b of all) {
+        const t = (b.innerText || '').trim();
+        if (/^(发送|分享|确定|发)$/.test(t) && b.getBoundingClientRect().width > 0) { b.click(); sent = true; break; }
+      }
+    }
+    if (!sent) return fail('未找到发送按钮', { ...diag, probe: dumpClickableTexts(scope) });
+    await sleep(rnd(1500, 2500));
+    return { ok: true, method: 'share_panel' };
+  }
+
   // ===== 消息处理 =====
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     (async () => {
@@ -537,6 +935,15 @@
           case 'SEND_DM': {
             // 在用户主页发送私信（由后台导航到 /user/profile/ 后调用）
             return await sendPrivateMessage(msg.text || '');
+          }
+          case 'FOLLOW_USER': {
+            return await followUser();
+          }
+          case 'PROBE_SHARE': {
+            return await probeSharePanel();
+          }
+          case 'SHARE_NOTE_TO_USER': {
+            return await shareNoteToUser(msg.userId, msg.userName, msg.caption);
           }
           default:
             return { ok: false, error: '未知消息类型：' + msg.type };

@@ -24,7 +24,7 @@
 | Chrome 商店图标 | `icons/icon128.png` | 128×128 |
 | Edge 商店 Logo | `icons/store-300.png` | 300×300（最小 128×128，1:1） |
 | 截图 | `store-assets/screenshots/01-run.png` ~ `04-tasklist.png` | 1280×800（Edge 也接受 640×400） |
-| 隐私政策 URL | `http://124.221.115.174/xhs-report/privacy` | 公网可访问 |
+| 隐私政策 URL | `https://linkpal.cloud/xhs-report/privacy` | 公网可访问 |
 
 ### 1.2 一致性检查（最容易漏，store-listing.md 顶部明确标注「提交前必改」）
 - **支持邮箱（表单里填的）必须 = 隐私政策页面里的联系邮箱**。
@@ -179,7 +179,7 @@ Dashboard → 「添加新项」→ 上传 zip → 填 **商品详情**（标题
   ```powershell
   ssh -o BatchMode=yes root@124.221.115.174 "grep -o '联系邮箱[^<]*' /opt/xhs-report/privacy.html"
   ```
-  再浏览器访问 `http://124.221.115.174/xhs-report/privacy?v=2`（加 `?v=2` 绕过浏览器本地缓存）确认内容。
+  再浏览器访问 `https://linkpal.cloud/xhs-report/privacy?v=2`（加 `?v=2` 绕过浏览器本地缓存）确认内容。
 - 缓存说明：nginx 对 `/xhs-report/` 不走 proxy_cache（1 年强缓存只针对 `/_next/static/`），服务器侧返回的是最新内容；只有浏览器本地可能缓存旧页，强刷即可。
 
 ---
@@ -204,7 +204,7 @@ Dashboard → 「添加新项」→ 上传 zip → 填 **商品详情**（标题
 | 微软/Edge 登录账号 | 见项目记忆 `project_memory.md`（MFA 验证码 → `594462206@qq.com`） |
 | Chrome 登录账号 | 同微软账号（Google 账号） |
 | 支持 / 联系邮箱 | `594462206@qq.com` |
-| 隐私政策 URL | `http://124.221.115.174/xhs-report/privacy` |
+| 隐私政策 URL | `https://linkpal.cloud/xhs-report/privacy` |
 | 隐私页源文件 | `report-server/privacy.html` |
 | 服务器 | `124.221.115.174`，root 免密 SSH，部署目录 `/opt/xhs-report/` |
 | Edge Store ID | `0RDCK9N2GFH9` |
